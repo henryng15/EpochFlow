@@ -76,9 +76,24 @@ when its expected state and generation still match.
 4. Add fencing, idempotent operations, and fault injection.
 5. Package a repeatable multi-worker demo with correctness and recovery metrics.
 
+## Quick start
+
+Requires Ubuntu 24.04 (or WSL2), Docker, and the apt packages listed in
+[ADR 0001](docs/decisions/0001-cpp-toolchain-and-dependencies.md).
+
+```bash
+cmake --preset dev && cmake --build --preset dev
+ctest --preset unit
+
+scripts/test-db.sh up
+EPOCHFLOW_DSN="$(scripts/test-db.sh dsn)" ctest --preset dev
+```
+
 ## Documentation
 
-As implementation begins, detailed design and operational documentation lives in
-[`docs/`](docs/), starting with architecture, invariants, storage, protocol,
-testing, and ADRs. Contribution and agent working rules are in
-[`AGENTS.md`](AGENTS.md).
+- [Architecture](docs/architecture.md): components and data/control flows
+- [Invariants](docs/invariants.md): safety properties and their enforcement
+- [Testing](docs/testing.md): test layers and how to run them
+- [Decisions](docs/decisions/): ADRs
+
+Contribution and agent working rules are in [`AGENTS.md`](AGENTS.md).
