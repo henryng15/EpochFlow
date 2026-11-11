@@ -1,2 +1,8 @@
 # Long-form planning archive; README.md and focused docs are the source of truth.
 docs/Proposal.md
+
+# Build output and local environment
+/build/
+/build-*/
+.env
+.cache/
