@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Explicit bash runs with pipefail, so `ctest | tee` still fails on test errors.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: epochflow
+          POSTGRES_PASSWORD: epochflow
+          POSTGRES_DB: epochflow_test
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U epochflow -d epochflow_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      EPOCHFLOW_DSN: host=127.0.0.1 port=15432 user=epochflow password=epochflow dbname=epochflow_test
+    steps:
+      - uses: actions/checkout@v4
+
+      # libpqxx comes from the PostgreSQL (PGDG) apt repository so CI builds
+      # against the same major version (8.x) as development machines; stock
+      # Ubuntu 24.04 ships 7.8. See docs/decisions/0001.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev protobuf-compiler \
+            libpqxx-dev libgtest-dev libgmock-dev
+
+      - name: Configure
+        run: cmake --preset dev
+
+      - name: Build
+        run: cmake --build --preset dev
+
+      - name: Test
+        run: ctest --preset dev | tee ctest.log
+
+      # Integration tests skip themselves without a database; in CI that would
+      # hide a broken service container, so any skip fails the job.
+      - name: Fail on skipped tests
+        run: "! grep -q '(Skipped)' ctest.log"
