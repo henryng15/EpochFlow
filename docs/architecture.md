@@ -18,8 +18,8 @@ tracks what exists; planned parts are marked as such.
 
 ## Design
 
-Current status: **version 1 complete** (milestone 5: Docker Compose deployment
-and chaos benchmark). A coordinator process serves the gRPC API over
+Current status: **version 1 complete**, Phase 2 P0 and P1 done
+([roadmap](../README.md#status)). A coordinator process serves the gRPC API over
 PostgreSQL (`--dsn`) or, without it, an in-memory store; worker processes pull jobs and run demonstration tasks
 whose side effects are deduplicated (owned ledger) or guarded against blind
 repetition (external provider). The in-process `LocalRunner` remains for tests
@@ -27,39 +27,23 @@ and runs the same `Worker` code.
 
 ### Job lifecycle
 
-```text
-             acquire (generation + 1)
-  PENDING ─────────────────────────────▶ RUNNING ──complete──▶ COMPLETED
-     ▲                                     │ │
-     │ retryable failure or expired lease, │ │ non-retryable failure, or
-     └─────────── attempts left ───────────┘ │ no attempts left
-                                             ├────────────────▶ FAILED
-                                             │
-                                             └─ unconfirmed ──▶ UNKNOWN ──reconcile──▶ COMPLETED | FAILED
-                                                external effect          (operator; resolves the
-                                                                          external operation too)
-```
+![Job lifecycle: PENDING, RUNNING, COMPLETED, FAILED, UNKNOWN](diagrams/job-lifecycle.svg)
 
-Rules and their rationale: [ADR 0002](decisions/0002-job-state-model-and-fencing-rules.md).
+Only the current assignment can move a job out of `RUNNING`; only an operator
+moves it out of `UNKNOWN`. Rules and their rationale:
+[ADR 0002](decisions/0002-job-state-model-and-fencing-rules.md).
 
 ### Processes and data flow
 
-```text
-epochflowctl ──SubmitJob / GetJob──┐
-                                   ▼
-                     epochflow-coordinator
-                      ├─ CoordinatorService ── one atomic call per RPC ──▶ JobStore
-                      └─ Reclaimer ── ReclaimExpired() every interval ───▶ PgJobStore
-                                   ▲                                       (PostgreSQL), or
-                                   │                                       InMemoryJobStore
-     AcquireJob / RenewLease /     │ gRPC (plaintext)
-     CompleteJob / FailJob         │
-                     epochflow-worker × N
-                      └─ Worker over CoordinatorClient (a WorkSource)
-                          ├─ LeaseKeeper thread: RenewLease every lease/3
-                          ├─ task(assignment, lease_lost token)
-                          └─ report with generation, retried if the ack is lost
-```
+![EpochFlow architecture: CLI, coordinator, workers, PostgreSQL, external provider](diagrams/architecture.svg)
+
+- **Coordinator:** `CoordinatorService` makes one atomic `JobStore` call per
+  RPC; the `Reclaimer` returns expired leases to `PENDING`. Without `--dsn` it
+  uses `InMemoryJobStore` instead of PostgreSQL.
+- **Worker:** a `Worker` over `CoordinatorClient` (a `WorkSource`); its
+  `LeaseKeeper` thread renews every lease/3, the task gets a `lease_lost`
+  token, and reports carry the generation and are retried if the ack is lost.
+- gRPC is plaintext (see Trade-offs).
 
 The store makes every change atomically and enforces fencing; the coordinator
 service, workers, and runner hold no authoritative state, so a coordinator can
@@ -67,20 +51,28 @@ crash and restart without losing jobs. In PostgreSQL each change is one
 conditional statement and the database clock decides lease expiry. Details:
 [protocol.md](protocol.md), [storage.md](storage.md).
 
+### Fencing
+
+![Fencing: a frozen worker's late CompleteJob is rejected as stale](diagrams/fencing.svg)
+
+A worker that loses its lease keeps running until it notices. Its late report
+carries the old generation, matches no row, and is rejected with
+`FAILED_PRECONDITION`; the newer assignment's result stands (invariant I3).
+
 ### Side effects
 
-```text
-payment task                         external task
-  ApplyLedgerOperation(op)             BeginExternalOperation(op)
-    └ store, one transaction:            ├ START     → provider.Charge → ConfirmExternalOperation
-      fence + operation + entry          ├ CONFIRMED → reuse the earlier answer
-      (repeat op → same entry)           └ IN_DOUBT  → MarkJobUnknown (never call again)
-                                       provider timeout → MarkJobUnknown
-```
+- **Payment (owned ledger):** `ApplyLedgerOperation(op)` is one store
+  transaction: fence check, operation row, ledger entry. Repeating `op` returns
+  the same entry.
+- **External provider:** EpochFlow cannot deduplicate the provider, so it
+  records intent first and never calls twice when the outcome is unclear:
+
+![External effect: intent, confirmation, UNKNOWN, reconciliation](diagrams/external-effect.svg)
 
 An `operation_id` (payload `op`, default `job-<id>`) names one logical effect
 across attempts and duplicate jobs. Details:
-[ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md).
+[ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md),
+[ADR 0006](decisions/0006-operation-level-reconciliation.md).
 
 ### In-process mode
 

@@ -34,49 +34,34 @@ effects it owns and makes unsupported external guarantees visible.
 
 ## Scope
 
-Version 1 intentionally stays small:
+One C++20 coordinator, independent C++20 workers, gRPC/Protobuf between them,
+and PostgreSQL for durable jobs, leases, generations, and operations. Job
+states: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `UNKNOWN`. Fault-injection
+tests cover crashes, pauses, duplicate delivery, coordinator restarts, and lost
+acknowledgements.
 
-- One C++20 coordinator and multiple independent C++20 worker processes.
-- gRPC and Protobuf for worker/coordinator communication.
-- PostgreSQL for durable job state, lease ownership, generations, and operations.
-- Job states: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, and `UNKNOWN`.
-- Heartbeats, lease renewal, recovery of expired leases, fencing checks, and
-  idempotency for a local demonstrator side effect.
-- Fault-injection tests for crashes, pauses, duplicate delivery, coordinator
-  restarts, and lost acknowledgements.
-
-Out of scope for v1: multi-region consensus, autoscaling, Kubernetes scheduling,
-custom database/storage engines, and unsupported exactly-once guarantees for
-third-party APIs.
+Out of scope: multi-region consensus, autoscaling, Kubernetes scheduling,
+custom storage engines, and exactly-once guarantees for third-party APIs.
 
 ## Architecture
 
-```text
-epochflowctl ── submit / get / reconcile ──┐
-                                           ▼
-                                  epochflow-coordinator ── one atomic, fenced
-                                    (gRPC + reclaimer)      statement per change ──▶ PostgreSQL
-                                           ▲                                        jobs, attempts,
-      acquire / renew / effects / report   │                                        operations, ledger
-                                  epochflow-worker × N ──▶ external provider
-```
+![EpochFlow architecture](docs/diagrams/architecture.svg)
 
-The coordinator assigns work and recovers expired leases. Workers renew their
-leases on a separate thread, apply side effects through the coordinator, and
-report results with their assignment generation. PostgreSQL accepts a change
-only when the job is still `RUNNING` with that generation, and deduplicates
-effects by operation id. Details: [architecture](docs/architecture.md).
+The coordinator assigns work and reclaims expired leases. Workers renew leases
+on a separate thread, apply side effects through the coordinator, and report
+with their assignment generation. PostgreSQL accepts a change only while the
+job is still `RUNNING` with that generation, and deduplicates effects by
+operation id. External effects the engine cannot deduplicate follow an
+intent, confirm, or `UNKNOWN` path:
+
+![External effect path](docs/diagrams/external-effect.svg)
+
+More diagrams (job lifecycle, fencing) and details:
+[architecture](docs/architecture.md).
 
 ## Status
 
-Version 1 is complete: all five roadmap steps are done.
-
-1. In-process job runner with a clear state model and tests.
-2. Coordinator and gRPC workers.
-3. PostgreSQL-backed durable state, leases, and recovery.
-4. Fencing, idempotent operations, `UNKNOWN` outcomes, and fault injection.
-5. Docker Compose demo and a chaos benchmark with correctness and recovery
-   metrics.
+![Roadmap: Version 1 (M0-M5) done, Phase 2 P0 and P1 done, P2 deferred](docs/diagrams/roadmap.svg)
 
 Phase 2 P0 and P1 are done ([Phase 2](docs/phase-2.md)):
 
@@ -164,5 +149,6 @@ runbook, and the benchmark.
 - [Phase 2](docs/phase-2.md): confirmation and reconciliation fixes, benchmark matrix
 - [Benchmark results](docs/benchmarks/phase-2/summary.md): Phase 2 matrix, raw runs, environment
 - [Decisions](docs/decisions/): ADRs
+- [Diagrams](docs/diagrams/README.md): D2 sources and how to re-render them
 
 Contribution and agent working rules are in [`AGENTS.md`](AGENTS.md).
