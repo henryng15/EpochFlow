@@ -87,6 +87,27 @@ struct OperationOutcome {
   bool deduplicated = false;
 };
 
+// What the caller of BeginExternal must do next.
+enum class ExternalState {
+  // The intent is recorded for this attempt: call the provider, then confirm.
+  kStart,
+  // An earlier attempt recorded the intent and never confirmed; it may or may
+  // not have reached the provider. Do not call it again: report UNKNOWN.
+  kInDoubt,
+  // An earlier call was confirmed; `result` holds the provider's answer.
+  kConfirmed,
+};
+
+std::string_view ToString(ExternalState state);
+
+struct ExternalBegin {
+  CommitStatus status = CommitStatus::kNotFound;
+  // Meaningful only when status is kAccepted.
+  ExternalState state = ExternalState::kStart;
+  // Provider confirmation when state is kConfirmed.
+  std::string result;
+};
+
 struct RenewResult {
   CommitStatus status = CommitStatus::kNotFound;
   // New lease deadline; meaningful only when status is kAccepted.

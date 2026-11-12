@@ -29,17 +29,24 @@ class InMemoryJobStore final : public JobStore {
                     bool retryable) override;
   OperationOutcome ApplyLedger(JobId id, Generation generation, const std::string& operation_id,
                                const LedgerEntry& entry) override;
+  ExternalBegin BeginExternal(JobId id, Generation generation, const std::string& operation_id,
+                              const std::string& request) override;
+  CommitStatus ConfirmExternal(const std::string& operation_id, const std::string& request,
+                               const std::string& confirmation) override;
+  CommitStatus MarkUnknown(JobId id, Generation generation, const std::string& reason) override;
+  CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) override;
   std::size_t ReclaimExpired() override;
 
  private:
   // One idempotent operation, keyed by operation_id (mirrors the operations
   // table of the PostgreSQL store).
   struct Operation {
-    std::string kind;     // "LEDGER"
+    std::string kind;     // "LEDGER" or "EXTERNAL"
     std::string request;  // canonical content, compared on reuse
+    std::string status;   // "APPLIED", "STARTED", or "CONFIRMED"
     JobId job_id = 0;
     Generation generation = 0;
-    std::string result;   // ledger entry id
+    std::string result;   // ledger entry id, or provider confirmation
   };
 
   // kAccepted if `id` is RUNNING with `generation`; else kStale / kNotFound.

@@ -274,6 +274,118 @@ OperationOutcome PgJobStore::ApplyLedger(JobId id, Generation generation,
   return {CommitStatus::kAccepted, std::to_string(r[2].as<std::int64_t>()), true};
 }
 
+ExternalBegin PgJobStore::BeginExternal(JobId id, Generation generation,
+                                        const std::string& operation_id,
+                                        const std::string& request) {
+  if (operation_id.empty()) throw std::invalid_argument("operation_id is required");
+  auto conn = pool_.Acquire();
+  pqxx::work tx{*conn};
+  if (const CommitStatus s = LockCurrentAssignment(tx, id, generation);
+      s != CommitStatus::kAccepted) {
+    return {s, ExternalState::kStart, {}};
+  }
+  const bool created =
+      !tx.exec(
+             "INSERT INTO operations (operation_id, kind, request, status, job_id, generation) "
+             "VALUES ($1, 'EXTERNAL', $2, 'STARTED', $3, $4) "
+             "ON CONFLICT (operation_id) DO NOTHING RETURNING 1",
+             pqxx::params{operation_id, request, id, generation})
+          .empty();
+  if (created) {
+    tx.commit();
+    return {CommitStatus::kAccepted, ExternalState::kStart, {}};
+  }
+  const pqxx::result existing = tx.exec(
+      "SELECT kind, request, status, job_id, generation, result FROM operations "
+      "WHERE operation_id = $1",
+      pqxx::params{operation_id});
+  tx.commit();
+  const pqxx::row_ref r = existing[0];
+  if (r[0].view() != "EXTERNAL" || r[1].view() != request) {
+    return {CommitStatus::kConflict, ExternalState::kStart, {}};
+  }
+  if (r[2].view() == "CONFIRMED") {
+    return {CommitStatus::kAccepted, ExternalState::kConfirmed, r[5].as<std::string>()};
+  }
+  const bool same_attempt = r[3].as<JobId>() == id && r[4].as<Generation>() == generation;
+  return {CommitStatus::kAccepted, same_attempt ? ExternalState::kStart : ExternalState::kInDoubt,
+          {}};
+}
+
+CommitStatus PgJobStore::ConfirmExternal(const std::string& operation_id,
+                                         const std::string& request,
+                                         const std::string& confirmation) {
+  auto conn = pool_.Acquire();
+  pqxx::work tx{*conn};
+  const pqxx::result updated = tx.exec(
+      "UPDATE operations SET status = 'CONFIRMED', result = $3, updated_at = now() "
+      "WHERE operation_id = $1 AND kind = 'EXTERNAL' AND request = $2 AND status = 'STARTED'",
+      pqxx::params{operation_id, request, confirmation});
+  CommitStatus status = CommitStatus::kAccepted;
+  if (updated.affected_rows() == 0) {
+    const pqxx::result existing = tx.exec(
+        "SELECT kind, request, status, result FROM operations WHERE operation_id = $1",
+        pqxx::params{operation_id});
+    if (existing.empty()) {
+      status = CommitStatus::kNotFound;
+    } else {
+      const pqxx::row_ref r = existing[0];
+      const bool same = r[0].view() == "EXTERNAL" && r[1].view() == request &&
+                        r[2].view() == "CONFIRMED" && r[3].view() == confirmation;
+      status = same ? CommitStatus::kAccepted : CommitStatus::kConflict;
+    }
+  }
+  tx.commit();
+  return status;
+}
+
+CommitStatus PgJobStore::MarkUnknown(JobId id, Generation generation, const std::string& reason) {
+  auto conn = pool_.Acquire();
+  pqxx::work tx{*conn};
+  const pqxx::result updated = tx.exec(
+      "UPDATE jobs SET state = 'UNKNOWN', error = $3, worker_id = NULL, lease_until = NULL, "
+      "updated_at = now() WHERE job_id = $1 AND generation = $2 AND state = 'RUNNING'",
+      pqxx::params{id, generation, reason});
+  const CommitStatus status = updated.affected_rows() == 1
+                                  ? CommitStatus::kAccepted
+                                  : ClassifyRejected(tx, id, generation, "UNKNOWN", "error", reason);
+  tx.commit();
+  return status;
+}
+
+CommitStatus PgJobStore::Reconcile(JobId id, JobState outcome, const std::string& detail) {
+  if (outcome != JobState::kCompleted && outcome != JobState::kFailed) {
+    throw std::invalid_argument("reconcile outcome must be COMPLETED or FAILED");
+  }
+  const bool completed = outcome == JobState::kCompleted;
+  auto conn = pool_.Acquire();
+  pqxx::work tx{*conn};
+  const pqxx::result updated =
+      completed ? tx.exec("UPDATE jobs SET state = 'COMPLETED', result = $2, updated_at = now() "
+                          "WHERE job_id = $1 AND state = 'UNKNOWN'",
+                          pqxx::params{id, pqxx::binary_cast(detail)})
+                : tx.exec("UPDATE jobs SET state = 'FAILED', error = $2, updated_at = now() "
+                          "WHERE job_id = $1 AND state = 'UNKNOWN'",
+                          pqxx::params{id, detail});
+  CommitStatus status = CommitStatus::kAccepted;
+  if (updated.affected_rows() == 0) {
+    const pqxx::result rows =
+        tx.exec("SELECT state, result, error FROM jobs WHERE job_id = $1", pqxx::params{id});
+    if (rows.empty()) {
+      status = CommitStatus::kNotFound;
+    } else {
+      // Repeating the decision that resolved the job is idempotent.
+      const pqxx::row_ref r = rows[0];
+      const bool same =
+          completed ? r[0].view() == "COMPLETED" && ToString(r[1].as<pqxx::bytes>()) == detail
+                    : r[0].view() == "FAILED" && !r[2].is_null() && r[2].view() == detail;
+      status = same ? CommitStatus::kAccepted : CommitStatus::kStale;
+    }
+  }
+  tx.commit();
+  return status;
+}
+
 std::size_t PgJobStore::ReclaimExpired() {
   auto conn = pool_.Acquire();
   pqxx::work tx{*conn};

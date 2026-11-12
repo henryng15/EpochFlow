@@ -139,8 +139,84 @@ OperationOutcome InMemoryJobStore::ApplyLedger(JobId id, Generation generation,
     return {CommitStatus::kAccepted, op.result, true};
   }
   const std::string entry_id = std::to_string(next_ledger_entry_++);
-  operations_.emplace(operation_id, Operation{"LEDGER", request, id, generation, entry_id});
+  operations_.emplace(operation_id,
+                      Operation{"LEDGER", request, "APPLIED", id, generation, entry_id});
   return {CommitStatus::kAccepted, entry_id, false};
+}
+
+ExternalBegin InMemoryJobStore::BeginExternal(JobId id, Generation generation,
+                                              const std::string& operation_id,
+                                              const std::string& request) {
+  if (operation_id.empty()) throw std::invalid_argument("operation_id is required");
+  std::lock_guard lock(mu_);
+  if (const CommitStatus s = CheckCurrent(id, generation); s != CommitStatus::kAccepted) {
+    return {s, ExternalState::kStart, {}};
+  }
+  const auto it = operations_.find(operation_id);
+  if (it == operations_.end()) {
+    operations_.emplace(operation_id,
+                        Operation{"EXTERNAL", request, "STARTED", id, generation, {}});
+    return {CommitStatus::kAccepted, ExternalState::kStart, {}};
+  }
+  const Operation& op = it->second;
+  if (op.kind != "EXTERNAL" || op.request != request) {
+    return {CommitStatus::kConflict, ExternalState::kStart, {}};
+  }
+  if (op.status == "CONFIRMED") return {CommitStatus::kAccepted, ExternalState::kConfirmed, op.result};
+  const bool same_attempt = op.job_id == id && op.generation == generation;
+  return {CommitStatus::kAccepted, same_attempt ? ExternalState::kStart : ExternalState::kInDoubt,
+          {}};
+}
+
+CommitStatus InMemoryJobStore::ConfirmExternal(const std::string& operation_id,
+                                               const std::string& request,
+                                               const std::string& confirmation) {
+  std::lock_guard lock(mu_);
+  const auto it = operations_.find(operation_id);
+  if (it == operations_.end()) return CommitStatus::kNotFound;
+  Operation& op = it->second;
+  if (op.kind != "EXTERNAL" || op.request != request) return CommitStatus::kConflict;
+  if (op.status == "CONFIRMED") {
+    return op.result == confirmation ? CommitStatus::kAccepted : CommitStatus::kConflict;
+  }
+  op.status = "CONFIRMED";
+  op.result = confirmation;
+  return CommitStatus::kAccepted;
+}
+
+CommitStatus InMemoryJobStore::MarkUnknown(JobId id, Generation generation,
+                                           const std::string& reason) {
+  std::lock_guard lock(mu_);
+  const auto it = jobs_.find(id);
+  if (it == jobs_.end()) return CommitStatus::kNotFound;
+  JobRecord& job = it->second;
+  if (job.state == JobState::kUnknown && job.generation == generation) {
+    return job.error == reason ? CommitStatus::kAccepted : CommitStatus::kConflict;
+  }
+  if (!IsCurrentAssignment(job, generation)) return CommitStatus::kStale;
+  TransitionTo(job, JobState::kUnknown);
+  job.error = reason;
+  ReleaseLease(job);
+  return CommitStatus::kAccepted;
+}
+
+CommitStatus InMemoryJobStore::Reconcile(JobId id, JobState outcome, const std::string& detail) {
+  if (outcome != JobState::kCompleted && outcome != JobState::kFailed) {
+    throw std::invalid_argument("reconcile outcome must be COMPLETED or FAILED");
+  }
+  std::lock_guard lock(mu_);
+  const auto it = jobs_.find(id);
+  if (it == jobs_.end()) return CommitStatus::kNotFound;
+  JobRecord& job = it->second;
+  if (job.state == JobState::kUnknown) {
+    TransitionTo(job, outcome);
+    (outcome == JobState::kCompleted ? job.result : job.error) = detail;
+    return CommitStatus::kAccepted;
+  }
+  // Repeating the decision that resolved the job is idempotent.
+  const auto& recorded = outcome == JobState::kCompleted ? job.result : job.error;
+  return job.state == outcome && recorded == detail ? CommitStatus::kAccepted
+                                                    : CommitStatus::kStale;
 }
 
 std::size_t InMemoryJobStore::ReclaimExpired() {

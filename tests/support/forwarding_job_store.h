@@ -28,6 +28,20 @@ class ForwardingJobStore : public JobStore {
                                const LedgerEntry& e) override {
     return inner_.ApplyLedger(id, g, op, e);
   }
+  ExternalBegin BeginExternal(JobId id, Generation g, const std::string& op,
+                              const std::string& req) override {
+    return inner_.BeginExternal(id, g, op, req);
+  }
+  CommitStatus ConfirmExternal(const std::string& op, const std::string& req,
+                               const std::string& conf) override {
+    return inner_.ConfirmExternal(op, req, conf);
+  }
+  CommitStatus MarkUnknown(JobId id, Generation g, const std::string& reason) override {
+    return inner_.MarkUnknown(id, g, reason);
+  }
+  CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) override {
+    return inner_.Reconcile(id, outcome, detail);
+  }
   std::size_t ReclaimExpired() override { return inner_.ReclaimExpired(); }
 
  protected:

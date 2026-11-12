@@ -525,5 +525,189 @@ TEST_P(JobStoreContractTest, ConcurrentApplyOfOneOperationCreatesOneEntry) {
   EXPECT_EQ(created, 1);
 }
 
+
+// --- External operations (intent before a non-idempotent call) ----------------
+
+struct Reassigned {
+  JobId id;
+  Assignment first;
+  Assignment second;
+};
+
+class ExternalHelpers {
+ public:
+  // Submits a job, acquires it, lets the lease expire, and re-acquires it.
+  static Reassigned SubmitAndReassign(JobStore& store, const std::function<void(Duration)>& advance,
+                                      const std::function<void(const Assignment&)>& during_first) {
+    const JobId id = store.Submit(JobSpec{"charge", 3});
+    const Assignment first = *store.Acquire("w1", kLease);
+    during_first(first);
+    advance(kLease + seconds{1});
+    EXPECT_EQ(store.ReclaimExpired(), 1u);
+    const Assignment second = *store.Acquire("w2", kLease);
+    return {id, first, second};
+  }
+};
+
+TEST_P(JobStoreContractTest, BeginExternalRecordsIntentForThisAttempt) {
+  const JobId id = store().Submit(Spec("charge"));
+  const auto a = store().Acquire("w1", kLease);
+
+  const auto begin = store().BeginExternal(id, a->generation, "charge-1", "card=4242;cents=500");
+  EXPECT_EQ(begin.status, CommitStatus::kAccepted);
+  EXPECT_EQ(begin.state, ExternalState::kStart);
+  // The same attempt retrying its request (lost acknowledgement) may proceed.
+  EXPECT_EQ(store().BeginExternal(id, a->generation, "charge-1", "card=4242;cents=500").state,
+            ExternalState::kStart);
+}
+
+TEST_P(JobStoreContractTest, UnconfirmedIntentFromEarlierAttemptIsInDoubt) {
+  // The first attempt recorded its intent, maybe called the provider, and died.
+  const auto r = ExternalHelpers::SubmitAndReassign(
+      store(), [&](Duration d) { AdvanceTime(d); },
+      [&](const Assignment& a) {
+        ASSERT_EQ(store().BeginExternal(a.job_id, a.generation, "charge-1", "req").state,
+                  ExternalState::kStart);
+      });
+
+  const auto begin = store().BeginExternal(r.id, r.second.generation, "charge-1", "req");
+  EXPECT_EQ(begin.status, CommitStatus::kAccepted);
+  EXPECT_EQ(begin.state, ExternalState::kInDoubt);
+}
+
+TEST_P(JobStoreContractTest, ConfirmedExternalResultIsReusedByLaterAttempt) {
+  const auto r = ExternalHelpers::SubmitAndReassign(
+      store(), [&](Duration d) { AdvanceTime(d); },
+      [&](const Assignment& a) {
+        store().BeginExternal(a.job_id, a.generation, "charge-1", "req");
+        ASSERT_EQ(store().ConfirmExternal("charge-1", "req", "ch_123"), CommitStatus::kAccepted);
+      });
+
+  const auto begin = store().BeginExternal(r.id, r.second.generation, "charge-1", "req");
+  EXPECT_EQ(begin.state, ExternalState::kConfirmed);
+  EXPECT_EQ(begin.result, "ch_123");
+}
+
+TEST_P(JobStoreContractTest, ConfirmFromStaleAttemptIsStillRecorded) {
+  // The provider answered the first attempt after its job was reassigned.
+  const auto r = ExternalHelpers::SubmitAndReassign(
+      store(), [&](Duration d) { AdvanceTime(d); },
+      [&](const Assignment& a) { store().BeginExternal(a.job_id, a.generation, "charge-1", "req"); });
+
+  EXPECT_EQ(store().ConfirmExternal("charge-1", "req", "ch_late"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().BeginExternal(r.id, r.second.generation, "charge-1", "req").state,
+            ExternalState::kConfirmed);
+}
+
+TEST_P(JobStoreContractTest, ConfirmExternalIsIdempotentAndDetectsConflicts) {
+  const JobId id = store().Submit(Spec("charge"));
+  const auto a = store().Acquire("w1", kLease);
+  store().BeginExternal(id, a->generation, "charge-1", "req");
+
+  EXPECT_EQ(store().ConfirmExternal("charge-1", "req", "ch_1"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().ConfirmExternal("charge-1", "req", "ch_1"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().ConfirmExternal("charge-1", "req", "ch_2"), CommitStatus::kConflict);
+  EXPECT_EQ(store().ConfirmExternal("charge-1", "other", "ch_1"), CommitStatus::kConflict);
+  EXPECT_EQ(store().ConfirmExternal("missing", "req", "ch_1"), CommitStatus::kNotFound);
+}
+
+TEST_P(JobStoreContractTest, BeginExternalIsFencedAndChecksContent) {
+  const JobId id = store().Submit(Spec("charge"));
+  const auto a = store().Acquire("w1", kLease);
+  EXPECT_EQ(store().BeginExternal(id, a->generation + 1, "charge-1", "req").status,
+            CommitStatus::kStale);
+  EXPECT_EQ(store().BeginExternal(987654, 1, "charge-1", "req").status, CommitStatus::kNotFound);
+  EXPECT_THROW(store().BeginExternal(id, a->generation, "", "req"), std::invalid_argument);
+
+  store().BeginExternal(id, a->generation, "charge-1", "req");
+  EXPECT_EQ(store().BeginExternal(id, a->generation, "charge-1", "different").status,
+            CommitStatus::kConflict);
+}
+
+TEST_P(JobStoreContractTest, LedgerAndExternalShareOneOperationNamespace) {
+  const JobId id = store().Submit(Spec("mixed"));
+  const auto a = store().Acquire("w1", kLease);
+  ASSERT_EQ(store().ApplyLedger(id, a->generation, "op-1", LedgerEntry{"bob", 1}).status,
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().BeginExternal(id, a->generation, "op-1", "req").status,
+            CommitStatus::kConflict);
+
+  store().BeginExternal(id, a->generation, "op-2", "req");
+  EXPECT_EQ(store().ApplyLedger(id, a->generation, "op-2", LedgerEntry{"bob", 1}).status,
+            CommitStatus::kConflict);
+}
+
+// --- UNKNOWN and reconciliation ------------------------------------------------
+
+TEST_P(JobStoreContractTest, MarkUnknownParksJobOutsideRetryAndRecovery) {
+  const JobId id = store().Submit(Spec("charge", 3));
+  const auto a = store().Acquire("w1", kLease);
+
+  EXPECT_EQ(store().MarkUnknown(id, a->generation, "provider timed out"), CommitStatus::kAccepted);
+  auto job = store().Get(id);
+  EXPECT_EQ(job->state, JobState::kUnknown);
+  EXPECT_EQ(job->error, "provider timed out");
+  EXPECT_FALSE(job->worker_id.has_value());
+  EXPECT_FALSE(job->lease_until.has_value());
+
+  // Never re-run automatically and never reclaimed.
+  AdvanceTime(kLease * 10);
+  EXPECT_EQ(store().ReclaimExpired(), 0u);
+  EXPECT_FALSE(store().Acquire("w2", kLease).has_value());
+  EXPECT_EQ(store().Get(id)->state, JobState::kUnknown);
+}
+
+TEST_P(JobStoreContractTest, MarkUnknownIsFencedAndIdempotent) {
+  const JobId id = store().Submit(Spec("charge"));
+  const auto a = store().Acquire("w1", kLease);
+  EXPECT_EQ(store().MarkUnknown(id, a->generation + 1, "x"), CommitStatus::kStale);
+  EXPECT_EQ(store().MarkUnknown(987654, 1, "x"), CommitStatus::kNotFound);
+
+  ASSERT_EQ(store().MarkUnknown(id, a->generation, "timeout"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().MarkUnknown(id, a->generation, "timeout"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().MarkUnknown(id, a->generation, "other"), CommitStatus::kConflict);
+  // A late completion from the same attempt cannot override the UNKNOWN.
+  EXPECT_EQ(store().Complete(id, a->generation, "done"), CommitStatus::kStale);
+}
+
+TEST_P(JobStoreContractTest, ReconcileResolvesUnknownWithEvidence) {
+  const JobId paid = store().Submit(Spec("a"));
+  const JobId unpaid = store().Submit(Spec("b"));
+  const auto p = store().Acquire("w1", kLease);
+  const auto u = store().Acquire("w1", kLease);
+  store().MarkUnknown(paid, p->generation, "timeout");
+  store().MarkUnknown(unpaid, u->generation, "timeout");
+
+  EXPECT_EQ(store().Reconcile(paid, JobState::kCompleted, "provider shows ch_9"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().Reconcile(unpaid, JobState::kFailed, "provider has no charge"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().Get(paid)->state, JobState::kCompleted);
+  EXPECT_EQ(store().Get(paid)->result, "provider shows ch_9");
+  EXPECT_EQ(store().Get(unpaid)->state, JobState::kFailed);
+  EXPECT_EQ(store().Get(unpaid)->error, "provider has no charge");
+}
+
+TEST_P(JobStoreContractTest, ReconcileIsIdempotentAndOnlyForUnknownJobs) {
+  const JobId id = store().Submit(Spec("a"));
+  EXPECT_EQ(store().Reconcile(id, JobState::kCompleted, "x"), CommitStatus::kStale);  // PENDING
+  const auto a = store().Acquire("w1", kLease);
+  EXPECT_EQ(store().Reconcile(id, JobState::kCompleted, "x"), CommitStatus::kStale);  // RUNNING
+  EXPECT_EQ(store().Reconcile(987654, JobState::kCompleted, "x"), CommitStatus::kNotFound);
+
+  store().MarkUnknown(id, a->generation, "timeout");
+  ASSERT_EQ(store().Reconcile(id, JobState::kCompleted, "ch_1"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().Reconcile(id, JobState::kCompleted, "ch_1"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().Reconcile(id, JobState::kCompleted, "ch_2"), CommitStatus::kStale);
+  EXPECT_EQ(store().Reconcile(id, JobState::kFailed, "ch_1"), CommitStatus::kStale);
+  EXPECT_EQ(store().Get(id)->result, "ch_1");
+}
+
+TEST_P(JobStoreContractTest, ReconcileRejectsNonTerminalOutcome) {
+  const JobId id = store().Submit(Spec("a"));
+  EXPECT_THROW(store().Reconcile(id, JobState::kPending, "x"), std::invalid_argument);
+  EXPECT_THROW(store().Reconcile(id, JobState::kUnknown, "x"), std::invalid_argument);
+}
+
 }  // namespace
 }  // namespace epochflow::testing

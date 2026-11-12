@@ -73,6 +73,44 @@ class JobStore {
                                        const std::string& operation_id,
                                        const LedgerEntry& entry) = 0;
 
+  // Records the intent to call an external system that has no idempotency
+  // key, before calling it, so a later attempt can tell that a call may already
+  // have happened. Fenced like ApplyLedger (kStale / kNotFound first). Then:
+  //  - new operation_id: intent recorded for this attempt -> kStart;
+  //  - intent recorded by this same job and generation (a retried request)
+  //    -> kStart again;
+  //  - intent recorded by another attempt or job, never confirmed -> kInDoubt;
+  //  - already confirmed -> kConfirmed with the provider's answer;
+  //  - different request, or a ledger operation with that id -> kConflict.
+  // Throws std::invalid_argument for an empty operation_id.
+  virtual ExternalBegin BeginExternal(JobId id, Generation generation,
+                                      const std::string& operation_id,
+                                      const std::string& request) = 0;
+
+  // Records the provider's confirmation for a started external operation.
+  // Deliberately not fenced: the provider's answer is a fact about the outside
+  // world, worth keeping even if the reporting attempt has gone stale, because
+  // it lets later attempts finish instead of becoming UNKNOWN. Idempotent for
+  // the same confirmation; kConflict for a different one or a different
+  // request; kNotFound for an unknown operation.
+  virtual CommitStatus ConfirmExternal(const std::string& operation_id,
+                                       const std::string& request,
+                                       const std::string& confirmation) = 0;
+
+  // RUNNING -> UNKNOWN for the caller's generation: the outcome of an external
+  // effect cannot be determined, so the job is neither retried nor failed
+  // (invariant I5). Releases the lease; UNKNOWN jobs are never reclaimed or
+  // acquired. A duplicate for the same generation is idempotent on `reason`
+  // (kAccepted / kConflict).
+  virtual CommitStatus MarkUnknown(JobId id, Generation generation,
+                                   const std::string& reason) = 0;
+
+  // Operator decision with outside evidence: UNKNOWN -> COMPLETED (`detail`
+  // becomes the result) or FAILED (`detail` becomes the error). Repeating the
+  // same decision is kAccepted; any other job state is kStale. Throws
+  // std::invalid_argument unless `outcome` is kCompleted or kFailed.
+  virtual CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) = 0;
+
   // Recovers every RUNNING job whose lease deadline is strictly in the past:
   // PENDING if attempts remain, otherwise FAILED. The generation is unchanged;
   // the next Acquire increments it. Returns the number of jobs recovered.

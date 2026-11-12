@@ -16,4 +16,16 @@ std::string_view ToString(CommitStatus status) {
   return "INVALID";
 }
 
+std::string_view ToString(ExternalState state) {
+  switch (state) {
+    case ExternalState::kStart:
+      return "START";
+    case ExternalState::kInDoubt:
+      return "IN_DOUBT";
+    case ExternalState::kConfirmed:
+      return "CONFIRMED";
+  }
+  return "INVALID";
+}
+
 }  // namespace epochflow
