@@ -4,6 +4,7 @@
 
 #include "runner/local_runner.h"
 #include "store/in_memory_job_store.h"
+#include "support/forwarding_job_store.h"
 #include "support/wait.h"
 
 #include <gtest/gtest.h>
@@ -41,28 +42,13 @@ bool AllTerminal(const JobStore& store, const std::vector<JobId>& ids) {
 
 // Delegates to an in-memory store but rejects every renewal of generation 1,
 // as if the first worker's renewals never reached the store.
-class RejectFirstGenerationRenewals final : public JobStore {
+class RejectFirstGenerationRenewals final : public ForwardingJobStore {
  public:
-  explicit RejectFirstGenerationRenewals(JobStore& inner) : inner_(inner) {}
-  JobId Submit(const JobSpec& spec) override { return inner_.Submit(spec); }
-  std::optional<JobRecord> Get(JobId id) const override { return inner_.Get(id); }
-  std::optional<Assignment> Acquire(const WorkerId& w, Duration lease) override {
-    return inner_.Acquire(w, lease);
-  }
+  using ForwardingJobStore::ForwardingJobStore;
   RenewResult Renew(JobId id, Generation generation, Duration lease) override {
     if (generation == 1) return {CommitStatus::kStale, {}};
     return inner_.Renew(id, generation, lease);
   }
-  CommitStatus Complete(JobId id, Generation g, const std::string& r) override {
-    return inner_.Complete(id, g, r);
-  }
-  CommitStatus Fail(JobId id, Generation g, const std::string& r, bool retry) override {
-    return inner_.Fail(id, g, r, retry);
-  }
-  std::size_t ReclaimExpired() override { return inner_.ReclaimExpired(); }
-
- private:
-  JobStore& inner_;
 };
 
 class LocalRunnerTest : public ::testing::Test {

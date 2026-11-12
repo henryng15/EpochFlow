@@ -403,5 +403,127 @@ TEST_P(JobStoreContractTest, CompleteAfterFinalFailureIsStale) {
   EXPECT_EQ(store().Complete(id, a->generation, "done"), CommitStatus::kStale);
 }
 
+
+// --- ApplyLedger (idempotent owned side effect) -------------------------------
+
+const LedgerEntry kPayment{"alice", 1000};
+
+TEST_P(JobStoreContractTest, ApplyLedgerCreatesEntryOnce) {
+  const JobId id = store().Submit(Spec("pay"));
+  const auto a = store().Acquire("w1", kLease);
+
+  const auto first = store().ApplyLedger(id, a->generation, "order-1", kPayment);
+  EXPECT_EQ(first.status, CommitStatus::kAccepted);
+  EXPECT_FALSE(first.deduplicated);
+  EXPECT_FALSE(first.result.empty());
+
+  // Retry by the same attempt (for example after a lost acknowledgement).
+  const auto again = store().ApplyLedger(id, a->generation, "order-1", kPayment);
+  EXPECT_EQ(again.status, CommitStatus::kAccepted);
+  EXPECT_TRUE(again.deduplicated);
+  EXPECT_EQ(again.result, first.result);
+}
+
+TEST_P(JobStoreContractTest, ApplyLedgerAfterCrashAndReassignmentDeduplicates) {
+  const JobId id = store().Submit(Spec("pay"));
+  const auto crashed = store().Acquire("w1", kLease);
+  const auto first = store().ApplyLedger(id, crashed->generation, "order-1", kPayment);
+  // The worker dies before reporting; the job is recovered and re-run.
+  AdvanceTime(kLease + seconds{1});
+  ASSERT_EQ(store().ReclaimExpired(), 1u);
+  const auto retry = store().Acquire("w2", kLease);
+
+  const auto second = store().ApplyLedger(id, retry->generation, "order-1", kPayment);
+  EXPECT_EQ(second.status, CommitStatus::kAccepted);
+  EXPECT_TRUE(second.deduplicated);
+  EXPECT_EQ(second.result, first.result);
+}
+
+TEST_P(JobStoreContractTest, ApplyLedgerFromStaleGenerationChangesNothing) {
+  const JobId id = store().Submit(Spec("pay"));
+  const auto paused = store().Acquire("w1", kLease);
+  AdvanceTime(kLease + seconds{1});
+  ASSERT_EQ(store().ReclaimExpired(), 1u);
+  const auto fresh = store().Acquire("w2", kLease);
+
+  // The paused worker resumes and tries to apply the effect first.
+  EXPECT_EQ(store().ApplyLedger(id, paused->generation, "order-1", kPayment).status,
+            CommitStatus::kStale);
+  // So the current attempt is the one that creates it.
+  const auto current = store().ApplyLedger(id, fresh->generation, "order-1", kPayment);
+  EXPECT_EQ(current.status, CommitStatus::kAccepted);
+  EXPECT_FALSE(current.deduplicated);
+}
+
+TEST_P(JobStoreContractTest, ApplyLedgerRequiresARunningAssignment) {
+  const JobId id = store().Submit(Spec("pay"));
+  EXPECT_EQ(store().ApplyLedger(id, 0, "order-1", kPayment).status, CommitStatus::kStale);
+  EXPECT_EQ(store().ApplyLedger(987654, 1, "order-1", kPayment).status, CommitStatus::kNotFound);
+}
+
+TEST_P(JobStoreContractTest, ApplyLedgerWithDifferentContentConflicts) {
+  const JobId id = store().Submit(Spec("pay"));
+  const auto a = store().Acquire("w1", kLease);
+  const auto first = store().ApplyLedger(id, a->generation, "order-1", kPayment);
+
+  const auto other = store().ApplyLedger(id, a->generation, "order-1", LedgerEntry{"alice", 999});
+  EXPECT_EQ(other.status, CommitStatus::kConflict);
+  // The original entry is untouched and still returned for matching retries.
+  EXPECT_EQ(store().ApplyLedger(id, a->generation, "order-1", kPayment).result, first.result);
+}
+
+TEST_P(JobStoreContractTest, ApplyLedgerDeduplicatesAcrossDuplicateJobs) {
+  // A client submitted the same logical payment twice.
+  const JobId first_job = store().Submit(Spec("pay"));
+  const JobId second_job = store().Submit(Spec("pay"));
+  const auto a = store().Acquire("w1", kLease);
+  const auto b = store().Acquire("w2", kLease);
+  ASSERT_EQ(a->job_id, first_job);
+  ASSERT_EQ(b->job_id, second_job);
+
+  const auto first = store().ApplyLedger(first_job, a->generation, "order-1", kPayment);
+  const auto second = store().ApplyLedger(second_job, b->generation, "order-1", kPayment);
+  EXPECT_FALSE(first.deduplicated);
+  EXPECT_TRUE(second.deduplicated);
+  EXPECT_EQ(second.result, first.result);
+}
+
+TEST_P(JobStoreContractTest, ApplyLedgerRejectsMissingIdentifiers) {
+  const JobId id = store().Submit(Spec("pay"));
+  const auto a = store().Acquire("w1", kLease);
+  EXPECT_THROW(store().ApplyLedger(id, a->generation, "", kPayment), std::invalid_argument);
+  EXPECT_THROW(store().ApplyLedger(id, a->generation, "order-1", LedgerEntry{"", 1}),
+               std::invalid_argument);
+}
+
+TEST_P(JobStoreContractTest, ConcurrentApplyOfOneOperationCreatesOneEntry) {
+  constexpr int kThreads = 8;
+  std::vector<Assignment> assignments;
+  for (int i = 0; i < kThreads; ++i) store().Submit(Spec("pay"));
+  for (int i = 0; i < kThreads; ++i) assignments.push_back(*store().Acquire("w", kLease));
+
+  std::vector<OperationOutcome> outcomes(kThreads);
+  std::atomic<bool> go{false};
+  {
+    std::vector<std::jthread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+      threads.emplace_back([&, t] {
+        while (!go.load()) std::this_thread::yield();
+        outcomes[t] = store().ApplyLedger(assignments[t].job_id, assignments[t].generation,
+                                          "order-race", kPayment);
+      });
+    }
+    go.store(true);
+  }
+
+  int created = 0;
+  for (const auto& o : outcomes) {
+    EXPECT_EQ(o.status, CommitStatus::kAccepted);
+    EXPECT_EQ(o.result, outcomes[0].result);
+    if (!o.deduplicated) ++created;
+  }
+  EXPECT_EQ(created, 1);
+}
+
 }  // namespace
 }  // namespace epochflow::testing

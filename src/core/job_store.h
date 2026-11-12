@@ -55,6 +55,24 @@ class JobStore {
   virtual CommitStatus Fail(JobId id, Generation generation, const std::string& reason,
                             bool retryable) = 0;
 
+  // Applies a ledger entry exactly once per `operation_id` (invariant I4), as
+  // part of the caller's assignment. In one atomic step:
+  //  - kStale / kNotFound unless the job is RUNNING with `generation`, checked
+  //    before anything else, so a stale worker learns nothing and changes
+  //    nothing;
+  //  - a new operation_id: records the operation and creates the entry
+  //    (deduplicated = false);
+  //  - an existing operation_id with the same entry: returns the existing
+  //    entry id (deduplicated = true), whichever job or attempt created it;
+  //  - an existing operation_id with different content, or used for another
+  //    kind of operation: kConflict, nothing changes.
+  // The fencing check holds for the whole step: the job cannot be reclaimed or
+  // reassigned between the check and the effect. Throws std::invalid_argument
+  // for an empty operation_id or account.
+  virtual OperationOutcome ApplyLedger(JobId id, Generation generation,
+                                       const std::string& operation_id,
+                                       const LedgerEntry& entry) = 0;
+
   // Recovers every RUNNING job whose lease deadline is strictly in the past:
   // PENDING if attempts remain, otherwise FAILED. The generation is unchanged;
   // the next Acquire increments it. Returns the number of jobs recovered.

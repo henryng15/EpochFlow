@@ -42,6 +42,8 @@ class PgJobStore final : public JobStore {
   CommitStatus Complete(JobId id, Generation generation, const std::string& result) override;
   CommitStatus Fail(JobId id, Generation generation, const std::string& reason,
                     bool retryable) override;
+  OperationOutcome ApplyLedger(JobId id, Generation generation, const std::string& operation_id,
+                               const LedgerEntry& entry) override;
   std::size_t ReclaimExpired() override;
 
  private:

@@ -1,5 +1,6 @@
 #include "coordinator/reclaimer.h"
 #include "store/in_memory_job_store.h"
+#include "support/forwarding_job_store.h"
 #include "support/manual_clock.h"
 #include "support/wait.h"
 
@@ -17,28 +18,15 @@ using std::chrono::milliseconds;
 using std::chrono::seconds;
 
 // In-memory store whose first ReclaimExpired call throws.
-class FailsFirstReclaim final : public JobStore {
+class FailsFirstReclaim final : public ForwardingJobStore {
  public:
-  explicit FailsFirstReclaim(JobStore& inner) : inner_(inner) {}
-  JobId Submit(const JobSpec& s) override { return inner_.Submit(s); }
-  std::optional<JobRecord> Get(JobId id) const override { return inner_.Get(id); }
-  std::optional<Assignment> Acquire(const WorkerId& w, Duration l) override {
-    return inner_.Acquire(w, l);
-  }
-  RenewResult Renew(JobId id, Generation g, Duration l) override { return inner_.Renew(id, g, l); }
-  CommitStatus Complete(JobId id, Generation g, const std::string& r) override {
-    return inner_.Complete(id, g, r);
-  }
-  CommitStatus Fail(JobId id, Generation g, const std::string& r, bool retry) override {
-    return inner_.Fail(id, g, r, retry);
-  }
+  using ForwardingJobStore::ForwardingJobStore;
   std::size_t ReclaimExpired() override {
     if (!failed_once_.exchange(true)) throw std::runtime_error("database unavailable");
     return inner_.ReclaimExpired();
   }
 
  private:
-  JobStore& inner_;
   std::atomic<bool> failed_once_{false};
 };
 

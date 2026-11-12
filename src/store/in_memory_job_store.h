@@ -27,14 +27,32 @@ class InMemoryJobStore final : public JobStore {
   CommitStatus Complete(JobId id, Generation generation, const std::string& result) override;
   CommitStatus Fail(JobId id, Generation generation, const std::string& reason,
                     bool retryable) override;
+  OperationOutcome ApplyLedger(JobId id, Generation generation, const std::string& operation_id,
+                               const LedgerEntry& entry) override;
   std::size_t ReclaimExpired() override;
 
  private:
+  // One idempotent operation, keyed by operation_id (mirrors the operations
+  // table of the PostgreSQL store).
+  struct Operation {
+    std::string kind;     // "LEDGER"
+    std::string request;  // canonical content, compared on reuse
+    JobId job_id = 0;
+    Generation generation = 0;
+    std::string result;   // ledger entry id
+  };
+
+  // kAccepted if `id` is RUNNING with `generation`; else kStale / kNotFound.
+  // Requires mu_.
+  CommitStatus CheckCurrent(JobId id, Generation generation) const;
+
   const Clock& clock_;
   mutable std::mutex mu_;
   // Ordered by id, which is submission order.
   std::map<JobId, JobRecord> jobs_;
   JobId next_id_ = 1;
+  std::map<std::string, Operation> operations_;
+  std::int64_t next_ledger_entry_ = 1;
 };
 
 }  // namespace epochflow

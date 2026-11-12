@@ -115,6 +115,34 @@ CommitStatus InMemoryJobStore::Fail(JobId id, Generation generation, const std::
   return CommitStatus::kAccepted;
 }
 
+CommitStatus InMemoryJobStore::CheckCurrent(JobId id, Generation generation) const {
+  const auto it = jobs_.find(id);
+  if (it == jobs_.end()) return CommitStatus::kNotFound;
+  return IsCurrentAssignment(it->second, generation) ? CommitStatus::kAccepted
+                                                     : CommitStatus::kStale;
+}
+
+OperationOutcome InMemoryJobStore::ApplyLedger(JobId id, Generation generation,
+                                               const std::string& operation_id,
+                                               const LedgerEntry& entry) {
+  if (operation_id.empty()) throw std::invalid_argument("operation_id is required");
+  if (entry.account.empty()) throw std::invalid_argument("account is required");
+  const std::string request = entry.account + "\n" + std::to_string(entry.amount_cents);
+  std::lock_guard lock(mu_);
+  // Fencing first, under the same lock as the effect (invariant I3).
+  if (const CommitStatus s = CheckCurrent(id, generation); s != CommitStatus::kAccepted) {
+    return {s, {}, false};
+  }
+  if (const auto it = operations_.find(operation_id); it != operations_.end()) {
+    const Operation& op = it->second;
+    if (op.kind != "LEDGER" || op.request != request) return {CommitStatus::kConflict, {}, false};
+    return {CommitStatus::kAccepted, op.result, true};
+  }
+  const std::string entry_id = std::to_string(next_ledger_entry_++);
+  operations_.emplace(operation_id, Operation{"LEDGER", request, id, generation, entry_id});
+  return {CommitStatus::kAccepted, entry_id, false};
+}
+
 std::size_t InMemoryJobStore::ReclaimExpired() {
   std::lock_guard lock(mu_);
   const TimePoint now = clock_.Now();

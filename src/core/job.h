@@ -70,6 +70,23 @@ enum class CommitStatus {
 
 std::string_view ToString(CommitStatus status);
 
+// An entry in the ledger owned by EpochFlow: the demonstration side effect
+// whose idempotency the store guarantees (invariant I4).
+struct LedgerEntry {
+  std::string account;
+  std::int64_t amount_cents = 0;
+};
+
+// Outcome of an idempotent operation (see JobStore::ApplyLedger).
+struct OperationOutcome {
+  CommitStatus status = CommitStatus::kNotFound;
+  // Ledger entry id when status is kAccepted.
+  std::string result;
+  // True when the operation already existed and its earlier result was
+  // returned instead of creating another effect.
+  bool deduplicated = false;
+};
+
 struct RenewResult {
   CommitStatus status = CommitStatus::kNotFound;
   // New lease deadline; meaningful only when status is kAccepted.

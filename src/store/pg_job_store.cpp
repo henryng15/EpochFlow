@@ -130,6 +130,19 @@ CommitStatus ClassifyRejected(pqxx::work& tx, JobId id, Generation generation,
   return same ? CommitStatus::kAccepted : CommitStatus::kConflict;
 }
 
+// Locks the job row in share mode if `id` is RUNNING with `generation`, which
+// blocks reclaim, reassignment, and completion of the job until the caller's
+// transaction ends. That makes "fencing check, then effect" atomic.
+CommitStatus LockCurrentAssignment(pqxx::work& tx, JobId id, Generation generation) {
+  const pqxx::result locked = tx.exec(
+      "SELECT 1 FROM jobs WHERE job_id = $1 AND generation = $2 AND state = 'RUNNING' "
+      "FOR SHARE",
+      pqxx::params{id, generation});
+  if (!locked.empty()) return CommitStatus::kAccepted;
+  const bool exists = !tx.exec("SELECT 1 FROM jobs WHERE job_id = $1", pqxx::params{id}).empty();
+  return exists ? CommitStatus::kStale : CommitStatus::kNotFound;
+}
+
 }  // namespace
 
 PgJobStore::PgJobStore(const std::string& dsn, PgStoreOptions options)
@@ -218,6 +231,47 @@ CommitStatus PgJobStore::Fail(JobId id, Generation generation, const std::string
                                   : ClassifyRejected(tx, id, generation, "FAILED", "error", reason);
   tx.commit();
   return status;
+}
+
+OperationOutcome PgJobStore::ApplyLedger(JobId id, Generation generation,
+                                         const std::string& operation_id,
+                                         const LedgerEntry& entry) {
+  if (operation_id.empty()) throw std::invalid_argument("operation_id is required");
+  if (entry.account.empty()) throw std::invalid_argument("account is required");
+  const std::string request = entry.account + "\n" + std::to_string(entry.amount_cents);
+
+  auto conn = pool_.Acquire();
+  pqxx::work tx{*conn};
+  if (const CommitStatus s = LockCurrentAssignment(tx, id, generation);
+      s != CommitStatus::kAccepted) {
+    return {s, {}, false};  // rolled back; nothing was written
+  }
+  // A concurrent insert of the same id makes this wait for the other
+  // transaction; if it commits, this inserts nothing and the read below sees
+  // its row.
+  const bool created =
+      !tx.exec(
+             "INSERT INTO operations (operation_id, kind, request, status, job_id, generation) "
+             "VALUES ($1, 'LEDGER', $2, 'APPLIED', $3, $4) "
+             "ON CONFLICT (operation_id) DO NOTHING RETURNING 1",
+             pqxx::params{operation_id, request, id, generation})
+          .empty();
+  if (created) {
+    const auto entry_id = tx.query_value<std::int64_t>(
+        "INSERT INTO ledger_entries (operation_id, account, amount_cents, job_id, generation) "
+        "VALUES ($1, $2, $3, $4, $5) RETURNING entry_id",
+        pqxx::params{operation_id, entry.account, entry.amount_cents, id, generation});
+    tx.commit();
+    return {CommitStatus::kAccepted, std::to_string(entry_id), false};
+  }
+  const pqxx::result existing = tx.exec(
+      "SELECT o.kind, o.request, l.entry_id FROM operations o "
+      "LEFT JOIN ledger_entries l USING (operation_id) WHERE o.operation_id = $1",
+      pqxx::params{operation_id});
+  tx.commit();
+  const pqxx::row_ref r = existing[0];
+  if (r[0].view() != "LEDGER" || r[1].view() != request) return {CommitStatus::kConflict, {}, false};
+  return {CommitStatus::kAccepted, std::to_string(r[2].as<std::int64_t>()), true};
 }
 
 std::size_t PgJobStore::ReclaimExpired() {
