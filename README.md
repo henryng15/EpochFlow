@@ -70,7 +70,7 @@ when its expected state and generation still match.
 
 ## Roadmap
 
-1. Build an in-process job runner with a clear state model and tests.
+1. Build an in-process job runner with a clear state model and tests. **(done)**
 2. Split it into a coordinator and gRPC workers.
 3. Add PostgreSQL-backed durable state, leases, and recovery.
 4. Add fencing, idempotent operations, and fault injection.
