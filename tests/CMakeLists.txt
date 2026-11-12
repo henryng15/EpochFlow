@@ -4,7 +4,10 @@ include(GoogleTest)
 add_executable(epochflow_unit_tests
   unit/dependency_smoke_test.cpp
   unit/job_state_test.cpp
+  unit/in_memory_job_store_test.cpp
+  contract/job_store_contract.cpp
 )
+target_include_directories(epochflow_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(epochflow_unit_tests PRIVATE
   epochflow gRPC::grpc++ protobuf::libprotobuf PkgConfig::PQXX GTest::gtest_main)
 gtest_discover_tests(epochflow_unit_tests PROPERTIES LABELS unit)
