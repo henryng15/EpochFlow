@@ -1,5 +1,6 @@
 # Core library shared by the runner, coordinator, worker, and tests.
 add_library(epochflow STATIC
+  common/flags.cpp
   common/log.cpp
   coordinator/reclaimer.cpp
   core/job.cpp

@@ -8,6 +8,7 @@ set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 # Unit tests: no external services. CTest label "unit".
 add_executable(epochflow_unit_tests
   unit/dependency_smoke_test.cpp
+  unit/flags_test.cpp
   unit/job_state_test.cpp
   unit/in_memory_job_store_test.cpp
   unit/lease_keeper_test.cpp
@@ -39,3 +40,4 @@ add_executable(epochflow_grpc_tests
 target_include_directories(epochflow_grpc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(epochflow_grpc_tests PRIVATE epochflow_rpc GTest::gtest_main)
 gtest_discover_tests(epochflow_grpc_tests PROPERTIES LABELS grpc)
+
