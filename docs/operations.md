@@ -137,9 +137,19 @@ happened. It stays that way until resolved:
 2. Check the provider's own record for the operation id (with the file
    provider: `awk -F'\t' '$1 == "OPERATION_ID"' PROVIDER_LOG`; the third
    column is the confirmation).
-3. Record the decision:
-   - charged: `epochflowctl reconcile JOB_ID --outcome=completed --detail=CONFIRMATION`
-   - not charged: `epochflowctl reconcile JOB_ID --outcome=failed --detail="no charge at provider"`
+3. Record the decision for the job and its operation together (the operation
+   id is named in the job's `error`):
+   - charged: `epochflowctl reconcile JOB_ID --operation=OPERATION_ID --outcome=completed --detail=CONFIRMATION`
+   - not charged: `epochflowctl reconcile JOB_ID --operation=OPERATION_ID --outcome=failed --detail="no charge at provider"`
+
+   Both records change in one transaction. After a `completed` decision, a
+   later job with the same operation id reuses `CONFIRMATION` instead of
+   becoming `UNKNOWN` again. A `failed` decision is final for that id: later
+   jobs reusing it fail without calling the provider, so submit a retry with a
+   new `op=`. Without `--operation`, reconciliation is refused while the job
+   still has an unconfirmed external operation (ADR 0006); it remains for jobs
+   that have none, such as a job that was in doubt about another job's
+   operation.
 
 Do not resubmit the job to "try again" without checking: that is exactly the
 double charge `UNKNOWN` exists to prevent.

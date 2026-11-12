@@ -58,6 +58,11 @@ what a clock jump would produce, and production SQL needs no test hook.
 with a unique `application_name`, so parallel CTest processes never share rows
 and a test can terminate exactly its own connections.
 
+**Atomicity under failure:** `FailedReconciliationLeavesJobAndOperationUnchanged`
+installs a trigger in its schema that raises on `UPDATE jobs`, so
+`ReconcileExternal` fails after it has updated the operation row; the test
+then checks that the operation is still `STARTED` and the job `UNKNOWN`.
+
 The suite covers: acquire ordering, exclusivity, and liveness (8 threads racing
 for 200 jobs; no acquire may come back empty while a job is unclaimed), stale generation on renew/complete/fail, reassignment after
 expiry, the window between deadline and reclaim, duplicate and conflicting
@@ -101,9 +106,9 @@ SIGCONT by the harness, and from SIGKILL of the coordinator.
 | Report acknowledgement lost | Retried, accepted as duplicate; one attempt |
 | Same request twice, plus a conflicting reuse | One entry; conflict fails without retry |
 | Coordinator SIGKILL mid-run (60 jobs, 3 workers) | All complete; 60 distinct entries with the right total |
-| Provider times out after charging | `UNKNOWN`, not retried; reconciled by `epochflowctl` |
+| Provider times out after charging | `UNKNOWN`, not retried; job-only reconcile refused; `reconcile --operation` resolves job and operation together |
 | Crash after the provider charged, before confirming | Next attempt `UNKNOWN`; provider charged once |
-| Provider charged, but no confirmation reaches the coordinator | `UNKNOWN`, not `COMPLETED` (I8); provider charged once |
+| Provider charged, but no confirmation reaches the coordinator | `UNKNOWN`, not `COMPLETED` (I8); after `reconcile --operation`, a new job with the same id reuses the confirmation; provider charged once |
 
 Every scenario, and every PostgreSQL contract test (through
 `StoreHarness::VerifyInvariants`), ends by running

@@ -18,8 +18,9 @@ handling.
 
 ### Schema
 
-Three migrations: `0001_jobs.sql` (jobs), `0002_operations.sql` (operations
-and ledger), `0003_job_attempts.sql` (attempt trace).
+Four migrations: `0001_jobs.sql` (jobs), `0002_operations.sql` (operations
+and ledger), `0003_job_attempts.sql` (attempt trace),
+`0004_operation_reconciliation.sql` (operator-resolved external operations).
 
 **`jobs`**
 
@@ -48,9 +49,10 @@ deadline (reclaim).
 | `operation_id` | Primary key, non-empty |
 | `kind` | `LEDGER` (owned effect) or `EXTERNAL` (third-party call) |
 | `request` | Canonical content; reuse with different content is a conflict |
-| `status` | `APPLIED` (ledger), `STARTED` (external intent), `CONFIRMED` (external answer recorded) |
+| `status` | `APPLIED` (ledger), `STARTED` (external intent), `CONFIRMED` (external answer recorded), `FAILED` (an operator proved the external effect never happened; terminal) |
 | `job_id`, `generation` | The assignment that created the row |
-| `result` | Provider confirmation, present exactly when `CONFIRMED` |
+| `result` | Provider confirmation (`CONFIRMED`) or the operator's evidence (`FAILED`); present exactly in those two states |
+| `reconciled_at` | When an operator decision resolved the row; required for `FAILED`, NULL when a worker confirmed it |
 
 **`ledger_entries`**: the owned demonstration effect; `UNIQUE (operation_id)`
 makes a second entry for one operation impossible. Records the job and
@@ -75,10 +77,11 @@ isolation:
 | Fail | Fenced `UPDATE ... SET state = CASE WHEN retryable AND attempts < max_attempts THEN 'PENDING' ELSE 'FAILED' END` |
 | Reclaim | `UPDATE ... WHERE state='RUNNING' AND lease_until < now()`: `PENDING` or `FAILED` by attempts |
 | MarkUnknown | Fenced `UPDATE ... SET state='UNKNOWN', error=$3`, clear lease |
-| Reconcile | `UPDATE ... WHERE job_id=$1 AND state='UNKNOWN'` to `COMPLETED` (result) or `FAILED` (error) |
+| Reconcile | `UPDATE ... WHERE job_id=$1 AND state='UNKNOWN' AND NOT EXISTS (a STARTED external operation of this job)` to `COMPLETED` (result) or `FAILED` (error) |
+| ReconcileExternal | One transaction: `SELECT ... FOR UPDATE` on the job, then on the operation (the only path holding both, so no lock-order cycle); check ownership and states; `UPDATE operations` to `CONFIRMED`/`FAILED` with the evidence and `reconciled_at`; `UPDATE jobs` to `COMPLETED`/`FAILED`. Any error rolls both back |
 | ApplyLedger | Fenced `SELECT ... FOR SHARE` on the job; `INSERT INTO operations ... ON CONFLICT DO NOTHING`; if inserted, `INSERT INTO ledger_entries`; otherwise read the existing operation and entry |
 | BeginExternal | Fenced `SELECT ... FOR SHARE`; `INSERT ... 'STARTED' ON CONFLICT DO NOTHING`; otherwise read status, creator, and confirmation |
-| ConfirmExternal | `UPDATE operations SET status='CONFIRMED', result=$3 WHERE ... status='STARTED'` (not fenced) |
+| ConfirmExternal | `UPDATE operations SET status='CONFIRMED', result=$3 WHERE ... status='STARTED'` (not fenced); a `FAILED` row is a conflict |
 
 Every job change that starts or ends an assignment also writes `job_attempts`
 in the same transaction: acquire inserts the row; complete, fail, mark-unknown,
@@ -179,3 +182,4 @@ See [operations.md](operations.md) for `--dsn` and the invariant checker, and
 - [Operations](operations.md)
 - [ADR 0004: PostgreSQL job store](decisions/0004-postgresql-job-store.md)
 - [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
+- [ADR 0006: operation-level reconciliation](decisions/0006-operation-level-reconciliation.md)

@@ -34,12 +34,14 @@ own monotonic clock, so worker and coordinator clocks need not agree.
 | `BeginExternalOperation` | Records intent (fenced); returns `START`, `IN_DOUBT`, or `CONFIRMED` (+ confirmation) | Safe within the same attempt (`START` again) |
 | `ConfirmExternalOperation` | Stores the provider's confirmation (not fenced) | Safe: same confirmation returns `OK` |
 | `MarkJobUnknown` | `RUNNING` to `UNKNOWN` (fenced) | Safe: same reason returns `OK` |
-| `ReconcileJob` | Operator: `UNKNOWN` to `COMPLETED`/`FAILED` with `detail` | Safe: same decision returns `OK` |
+| `ReconcileJob` | Operator: `UNKNOWN` to `COMPLETED`/`FAILED` with `detail`; with `operation_id`, the job's external operation becomes `CONFIRMED`/`FAILED` in the same transaction | Safe: same decision returns `OK` |
 
 **External operation states:** `START` means call the provider, then confirm;
 `IN_DOUBT` means another attempt recorded the intent and never confirmed, so
 the worker must not call the provider and reports `UNKNOWN` instead;
-`CONFIRMED` returns the earlier answer for reuse.
+`CONFIRMED` returns the earlier answer for reuse; `FAILED` means an operator
+proved the effect never happened, so the worker fails the job without retry
+(the evidence is in `confirmation`).
 
 ### Error model
 
@@ -47,9 +49,9 @@ the worker must not call the provider and reports `UNKNOWN` instead;
 | --- | --- | --- |
 | `OK` | Applied, or identical duplicate recognized | Continue |
 | `INVALID_ARGUMENT` | Malformed request (negative `max_attempts`, empty `worker_id` or `operation_id`, non-terminal reconcile outcome) | Fix the request |
-| `NOT_FOUND` | Unknown job id | Drop |
-| `FAILED_PRECONDITION` | Stale assignment: job not `RUNNING` with this generation (reconcile: job not `UNKNOWN`) | **Stop work, discard result** |
-| `ALREADY_EXISTS` | Duplicate of the finishing request with different content, or an `operation_id` reused with different content or kind | Drop; outcome unchanged; for operations, fail the job without retry |
+| `NOT_FOUND` | Unknown job id (reconcile: or unknown `operation_id`) | Drop |
+| `FAILED_PRECONDITION` | Stale assignment: job not `RUNNING` with this generation (reconcile: job not `UNKNOWN`, or no `operation_id` while the job has an unconfirmed external operation) | **Stop work, discard result** |
+| `ALREADY_EXISTS` | Duplicate of the finishing request with different content, or an `operation_id` reused with different content or kind (reconcile: not this job's external operation, or the decision contradicts its recorded confirmation) | Drop; outcome unchanged; for operations, fail the job without retry |
 | `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `INTERNAL` | Outcome unknown | Retry idempotent calls with the same generation |
 
 ## Invariants and failure semantics
@@ -78,7 +80,8 @@ the worker must not call the provider and reports `UNKNOWN` instead;
   of `CompleteJob`, and never calls the provider again.
 - **Uncertainty is reported, not guessed.** A provider timeout or an
   unconfirmed earlier intent becomes `MarkJobUnknown`; the job waits for
-  `ReconcileJob`.
+  `ReconcileJob`, which resolves its external operation in the same
+  transaction (ADR 0006).
 
 ## Implementation map
 
@@ -116,3 +119,4 @@ loopback connection; `tests/grpc/distributed_test.cpp` and
 - [Operations](operations.md)
 - [ADR 0003: coordinator protocol](decisions/0003-coordinator-protocol.md)
 - [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
+- [ADR 0006: operation-level reconciliation](decisions/0006-operation-level-reconciliation.md)

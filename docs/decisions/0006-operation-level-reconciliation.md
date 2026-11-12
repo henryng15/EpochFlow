@@ -47,14 +47,16 @@ charge. Version 1 had no way to store that fact on the operation.
    id. A provider confirmation for a `FAILED` operation is a conflict, which
    the worker turns into `UNKNOWN` (invariant I8).
 5. **Contradictions are rejected without writing anything:** a different
-   decision or different evidence for a resolved pair, completed evidence
-   that differs from an existing confirmation, or a failed decision for a
-   confirmed operation.
+   decision or different evidence for an already resolved pair (the job is no
+   longer `UNKNOWN`), completed evidence that differs from an existing
+   confirmation, or a failed decision for a confirmed operation.
 
-Status mapping over gRPC follows the existing error model: job not `UNKNOWN`,
-or job-only reconcile with an unresolved operation, is `FAILED_PRECONDITION`;
-an operation that is missing is `NOT_FOUND`; an operation that is not this
-job's external operation, or conflicting evidence, is `ALREADY_EXISTS`.
+Status mapping over gRPC follows the existing error model: a job that is not
+`UNKNOWN` (unless the request repeats its resolving decision), or job-only
+reconciliation with an unresolved operation, is `FAILED_PRECONDITION`; a
+missing job or operation is `NOT_FOUND`; an operation that is not this job's
+external operation, or evidence contradicting its recorded confirmation, is
+`ALREADY_EXISTS`.
 
 ## Consequences
 

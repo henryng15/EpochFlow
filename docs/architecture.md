@@ -36,7 +36,8 @@ and runs the same `Worker` code.
                                              ├────────────────▶ FAILED
                                              │
                                              └─ unconfirmed ──▶ UNKNOWN ──reconcile──▶ COMPLETED | FAILED
-                                                external effect          (operator)
+                                                external effect          (operator; resolves the
+                                                                          external operation too)
 ```
 
 Rules and their rationale: [ADR 0002](decisions/0002-job-state-model-and-fencing-rules.md).
@@ -100,7 +101,7 @@ See [invariants.md](invariants.md).
 | Worker paused, resumes after reassignment | Its effect and its report are rejected as stale; nothing changes |
 | Same logical request submitted twice | One effect; the second job reports the deduplicated entry |
 | `operation_id` reused with different content | Job fails without retry (conflict) |
-| External provider times out | Job `UNKNOWN`; not retried until an operator reconciles |
+| External provider times out | Job `UNKNOWN`; not retried until an operator reconciles the job and its operation together ([ADR 0006](decisions/0006-operation-level-reconciliation.md)) |
 | Worker crashes during an external call | Next attempt finds the unconfirmed intent and reports `UNKNOWN` instead of charging again |
 | Provider charged, but the confirmation is rejected or never recorded | Job `UNKNOWN`, not `COMPLETED` (I8); the provider is not called again |
 | Coordinator crash and restart (PostgreSQL) | All committed state survives; leases keep their deadlines; expired ones are reclaimed after restart |
@@ -158,3 +159,4 @@ See [invariants.md](invariants.md).
 - [ADR 0003: coordinator protocol](decisions/0003-coordinator-protocol.md)
 - [ADR 0004: PostgreSQL job store](decisions/0004-postgresql-job-store.md)
 - [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
+- [ADR 0006: operation-level reconciliation](decisions/0006-operation-level-reconciliation.md)

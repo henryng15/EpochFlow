@@ -21,7 +21,7 @@ See [architecture.md](architecture.md) for job, lease, generation, and reclaim.
 | I5 | An unconfirmed external effect is recorded as `UNKNOWN`, never silently retried or marked failed. | Both stores and workers (M4) |
 | I6 | Committed job state survives a coordinator restart. | PostgreSQL store (M3) |
 | I7 | Once a job is terminal, its outcome (`result` or `error`) never changes. | Both stores (M1, M3) |
-| I8 | A worker reports a provider effect as completed only after the durable operation record confirms that operation, request, and provider answer. | Workers (Phase 2, P0) |
+| I8 | A job is completed with a provider effect only after the durable operation record confirms that operation, request, and provider answer: a worker needs a recorded confirmation, and an operator decision resolves the operation together with the job. | Workers (Phase 2, P0); both stores (P1) |
 
 External effects are at most once, not exactly once: a provider without
 idempotency keys cannot be deduplicated, so EpochFlow guarantees only that it
@@ -31,8 +31,9 @@ never repeats a call whose outcome it does not know (see
 **Checking from data.** `scripts/check-invariants.sql` verifies I2-I4 from the
 tables at rest (attempt numbering, one open attempt, one deciding attempt from
 the current generation, state matching the deciding attempt, one ledger entry
-per operation, effects applied by real assignments), I8 (no worker-completed
-job owns an external operation that is still `STARTED`), plus stalled recovery.
+per operation, effects applied by real assignments), I8 (no completed job
+owns an external operation that is `STARTED` or `FAILED`, and every
+operator-resolved operation agrees with its job), plus stalled recovery.
 Every PostgreSQL contract test and every fault-injection scenario ends by
 running it.
 
@@ -49,10 +50,10 @@ late, but cannot let two assignments both commit.
 | I2 | In memory: claim and generation bump under the store mutex. In PostgreSQL: one `UPDATE` claims a `FOR UPDATE SKIP LOCKED` row and bumps the generation, re-checking `state = 'PENDING'` | `ConcurrentAcquiresAssignEachJobExactlyOnce`, `RunningJobIsNotAssignedAgain` (both stores) |
 | I3 | In memory: `IsCurrentAssignment` check in `Renew`, `Complete`, `Fail`, in the same critical section as the update. In PostgreSQL: the same predicate in the `WHERE` clause of each `UPDATE` (`src/store/pg_job_store.cpp`). In both: `ReclaimExpired` moves expired jobs out of `RUNNING`; `Worker` never reports after a lost lease; over gRPC, stale maps to `FAILED_PRECONDITION` (`src/rpc/convert.cpp`) | `StaleWorkerCannotCompleteAfterReassignment`, `CompleteAfterReclaimBeforeReacquireIsStale`, `RenewAfterReclaimIsStale`, `LostLeaseCancelsTaskAndDiscardsItsResult`, `CoordinatorGrpcTest.StaleWorkerIsFencedAfterReassignment`, `CrashedWorkersJobIsRecoveredByAnotherWorker`, `e2e.smoke` |
 | I4 | Ledger: fenced share lock, operation insert, and entry insert in one transaction; `UNIQUE (operation_id)` on `ledger_entries`; in memory, the same steps under the store mutex. External: intent row (`STARTED`) before the provider call; another attempt's unconfirmed intent yields `kInDoubt` | `ApplyLedger*` and `ConcurrentApplyOfOneOperationCreatesOneEntry` (both stores), `test_crash_after_effect_is_deduplicated`, `test_duplicate_requests_create_one_effect`, `test_coordinator_crash_mid_run_loses_and_duplicates_nothing`, checker `I4 ledger operation has entry` |
-| I5 | `ExternalState::kInDoubt` and provider timeouts become `JobUnknown` in the external task (`src/worker/tasks.cpp`); `MarkUnknown` parks the job outside reclaim and acquire; only `Reconcile` leaves `UNKNOWN` | `MarkUnknownParksJobOutsideRetryAndRecovery`, `UnconfirmedIntentFromEarlierAttemptIsInDoubt`, `test_external_timeout_is_unknown_until_reconciled`, `test_crash_during_external_call_is_never_charged_twice` |
+| I5 | `ExternalState::kInDoubt` and provider timeouts become `JobUnknown` in the external task (`src/worker/tasks.cpp`); `MarkUnknown` parks the job outside reclaim and acquire; only `Reconcile` or `ReconcileExternal` leaves `UNKNOWN` | `MarkUnknownParksJobOutsideRetryAndRecovery`, `UnconfirmedIntentFromEarlierAttemptIsInDoubt`, `test_external_timeout_is_unknown_until_reconciled`, `test_crash_during_external_call_is_never_charged_twice` |
 | I6 | Every acknowledged change is committed before the RPC returns; the coordinator keeps no state of its own | `StateSurvivesStoreRestart`, `e2e.restart` |
 | I7 | Duplicate check for the finishing generation returns `kAccepted`/`kConflict` without writing; this is what makes `Worker` report retries safe | `DuplicateCompleteWithDifferentResultConflicts`, `DuplicateFinalFailureIsIdempotent`, `CompleteAfterFinalFailureIsStale`, `RetriesReportWhenAcknowledgementIsLost` |
-| I8 | After the provider call, the external task (`src/worker/tasks.cpp`) succeeds only if `ConfirmExternal` returns `kAccepted` (an identical duplicate counts, so a lost acknowledgement is safe); a rejection, or three transport failures, returns `JobUnknown` without calling the provider again | `RejectedConfirmationMakesTheOutcomeUnknownWithoutCallingTheProviderAgain`, `ConfirmationThatNeverReachesTheStoreMakesTheOutcomeUnknown`, `LostConfirmationAcknowledgementIsRecognizedOnRetry`, `UnrecordedConfirmationLeavesTheJobUnknownNotCompleted`, `test_lost_confirmation_is_unknown_not_completed`, checker `I8 completed job has unresolved external operation` |
+| I8 | After the provider call, the external task (`src/worker/tasks.cpp`) succeeds only if `ConfirmExternal` returns `kAccepted` (an identical duplicate counts, so a lost acknowledgement is safe); a rejection, or three transport failures, returns `JobUnknown` without calling the provider again. `ReconcileExternal` changes the operation and the job in one transaction (both stores); job-only `Reconcile` is refused while the job has a `STARTED` external operation | `RejectedConfirmationMakesTheOutcomeUnknownWithoutCallingTheProviderAgain`, `ConfirmationThatNeverReachesTheStoreMakesTheOutcomeUnknown`, `LostConfirmationAcknowledgementIsRecognizedOnRetry`, `UnrecordedConfirmationLeavesTheJobUnknownNotCompleted`, `test_lost_confirmation_is_unknown_not_completed`, `ReconcileExternal*` and `JobOnlyReconcileIsRefusedWhileAnExternalOperationIsUnresolved` (both stores), `FailedReconciliationLeavesJobAndOperationUnchanged`, `InvariantCheckerReportsJobOperationDivergence`, checker `I8 completed job has unresolved external operation` and `I8 reconciled operation disagrees with job` |
 
 ## Related documents
 
@@ -61,3 +62,4 @@ late, but cannot let two assignments both commit.
 - [ADR 0002: job state model and fencing rules](decisions/0002-job-state-model-and-fencing-rules.md)
 - [Storage](storage.md)
 - [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
+- [ADR 0006: operation-level reconciliation](decisions/0006-operation-level-reconciliation.md)

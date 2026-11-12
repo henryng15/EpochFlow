@@ -8,7 +8,9 @@ evidence. It does **not** add Kubernetes, consensus, autoscaling, a workflow
 DSL, or a new AI scheduler.
 
 **Status:** P0 is implemented (invariant I8; see
-[Invariants](invariants.md)). P1 is in progress; P2 is deferred. See [Architecture](architecture.md)
+[Invariants](invariants.md)). P1 operation-level reconciliation is implemented
+([ADR 0006](decisions/0006-operation-level-reconciliation.md)); the P1
+benchmark matrix is in progress; P2 is deferred. See [Architecture](architecture.md)
 and [ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
 for the current external-effect design.
 
