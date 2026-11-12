@@ -1,5 +1,10 @@
 include(GoogleTest)
 
+# Discover tests when CTest runs, not at build time, so wrappers such as
+# `setarch -R` (needed by ThreadSanitizer, see docs/testing.md) also apply to
+# discovery.
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+
 # Unit tests: no external services. CTest label "unit".
 add_executable(epochflow_unit_tests
   unit/dependency_smoke_test.cpp

@@ -9,6 +9,16 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Debug build with ThreadSanitizer",
+      "inherits": "dev",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+      }
     }
   ],
   "buildPresets": [
@@ -16,6 +26,14 @@
       "name": "dev",
       "configurePreset": "dev",
       "jobs": 2
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "jobs": 2,
+      "targets": [
+        "epochflow_unit_tests"
+      ]
     }
   ],
   "testPresets": [
@@ -33,6 +51,21 @@
         "include": {
           "label": "unit"
         }
+      }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "unit"
+        }
+      },
+      "environment": {
+        "TSAN_OPTIONS": "halt_on_error=1"
       }
     }
   ]
