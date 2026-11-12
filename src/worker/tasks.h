@@ -22,8 +22,9 @@ struct TaskHooks {
 };
 
 struct TaskOptions {
-  // Duration of the echo task.
-  std::chrono::milliseconds echo_work{0};
+  // Simulated processing time of every task, spent before its side effect
+  // (the whole of the echo task). Abandoned early if the lease is lost.
+  std::chrono::milliseconds work{0};
   // Required for external tasks; must outlive the handler.
   ExternalProvider* provider = nullptr;
   TaskHooks hooks;
@@ -34,6 +35,8 @@ struct TaskOptions {
 std::map<std::string, std::string> ParsePayload(std::string_view payload);
 
 // The demonstration tasks, selected by the payload's "task" key:
+//
+// Every task first spends `work` (see TaskOptions), then:
 //
 //   task=payment;account=A;amount_cents=N[;op=ID]
 //     Applies a ledger entry through WorkSource::ApplyLedger, exactly once per
@@ -48,8 +51,7 @@ std::map<std::string, std::string> ParsePayload(std::string_view payload);
 //     with ";reused=true" when an earlier attempt's confirmation is reused.
 //
 //   anything else
-//     Echo: waits echo_work (abandoning early if the lease is lost) and returns
-//     "processed:<payload>".
+//     Echo: returns "processed:<payload>".
 //
 // Invalid payloads and operation-id conflicts fail without retry. A stale
 // assignment returns a retryable failure, which the worker cannot report

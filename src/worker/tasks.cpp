@@ -112,14 +112,14 @@ HandlerResult External(WorkSource& source, const TaskOptions& options, const Ass
   return JobSucceeded{std::format("charge={}", confirmation)};
 }
 
-HandlerResult Echo(const TaskOptions& options, const Assignment& a, std::stop_token lease_lost) {
-  const auto deadline = std::chrono::steady_clock::now() + options.echo_work;
+// Spends `work`; false if the lease was lost meanwhile.
+bool SimulateWork(std::chrono::milliseconds work, std::stop_token lease_lost) {
+  const auto deadline = std::chrono::steady_clock::now() + work;
   while (std::chrono::steady_clock::now() < deadline) {
-    if (lease_lost.stop_requested()) return JobFailed{"lease lost", true};
-    std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(
-        options.echo_work, std::chrono::milliseconds{10}));
+    if (lease_lost.stop_requested()) return false;
+    std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(work, std::chrono::milliseconds{10}));
   }
-  return JobSucceeded{"processed:" + a.payload};
+  return !lease_lost.stop_requested();
 }
 
 }  // namespace
@@ -140,10 +140,11 @@ std::map<std::string, std::string> ParsePayload(std::string_view payload) {
 
 JobHandler MakeTaskHandler(WorkSource& source, TaskOptions options) {
   return [&source, options](const Assignment& a, std::stop_token lease_lost) -> HandlerResult {
+    if (!SimulateWork(options.work, lease_lost)) return JobFailed{"lease lost", true};
     const auto payload = ParsePayload(a.payload);
     const auto task = payload.find("task");
     if (task == payload.end() || (task->second != "payment" && task->second != "external")) {
-      return Echo(options, a, lease_lost);
+      return JobSucceeded{"processed:" + a.payload};
     }
     std::string error;
     const auto charge = ParseCharge(payload, a, error);
