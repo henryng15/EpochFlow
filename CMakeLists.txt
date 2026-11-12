@@ -26,5 +26,7 @@ find_package(PkgConfig REQUIRED)
 # libpqxx ships no CMake package on Ubuntu, only a pkg-config file.
 pkg_check_modules(PQXX REQUIRED IMPORTED_TARGET libpqxx)
 
+add_subdirectory(src)
+
 enable_testing()
 add_subdirectory(tests)
