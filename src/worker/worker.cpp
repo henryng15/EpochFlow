@@ -57,6 +57,7 @@ bool Worker::RunOnce() {
 
 void Worker::Execute(const Assignment& a) {
   Log(std::format("acquired job={} generation={} attempt={}", a.job_id, a.generation, a.attempt));
+  if (options_.after_acquire) options_.after_acquire(a);
   LeaseKeeper keeper(
       [this, &a] { return source_.Renew(a.job_id, a.generation) == CommitStatus::kAccepted; },
       RenewInterval(a.lease));
@@ -68,22 +69,25 @@ void Worker::Execute(const Assignment& a) {
     Log(std::format("lease lost job={} generation={}; result discarded", a.job_id, a.generation));
     return;
   }
+  if (options_.before_report) options_.before_report(a);
   Report(a, outcome);
 }
 
 void Worker::Report(const Assignment& a, const HandlerResult& outcome) {
-  const auto* ok = std::get_if<JobSucceeded>(&outcome);
+  const char* kind = std::holds_alternative<JobSucceeded>(outcome) ? "success"
+                     : std::holds_alternative<JobFailed>(outcome)  ? "failure"
+                                                                   : "unknown";
   for (int attempt = 1; attempt <= options_.report_attempts; ++attempt) {
     try {
       CommitStatus status;
-      if (ok != nullptr) {
+      if (const auto* ok = std::get_if<JobSucceeded>(&outcome)) {
         status = source_.Complete(a.job_id, a.generation, ok->result);
+      } else if (const auto* failed = std::get_if<JobFailed>(&outcome)) {
+        status = source_.Fail(a.job_id, a.generation, failed->reason, failed->retryable);
       } else {
-        const auto& failed = std::get<JobFailed>(outcome);
-        status = source_.Fail(a.job_id, a.generation, failed.reason, failed.retryable);
+        status = source_.MarkUnknown(a.job_id, a.generation, std::get<JobUnknown>(outcome).reason);
       }
-      Log(std::format("reported {} job={} generation={} status={}",
-                      ok != nullptr ? "success" : "failure", a.job_id, a.generation,
+      Log(std::format("reported {} job={} generation={} status={}", kind, a.job_id, a.generation,
                       ToString(status)));
       return;
     } catch (const std::exception& e) {

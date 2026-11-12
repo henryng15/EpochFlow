@@ -18,6 +18,10 @@ v1::JobState ToProto(JobState state);
 // Throws std::invalid_argument for JOB_STATE_UNSPECIFIED or unknown values.
 JobState FromProto(v1::JobState state);
 
+v1::ExternalState ToProto(ExternalState state);
+// Throws std::invalid_argument for EXTERNAL_STATE_UNSPECIFIED or unknown values.
+ExternalState FromProto(v1::ExternalState state);
+
 std::int64_t ToUnixMs(TimePoint t);
 TimePoint FromUnixMs(std::int64_t ms);
 

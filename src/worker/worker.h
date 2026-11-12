@@ -23,7 +23,14 @@ struct JobFailed {
   bool retryable = true;
 };
 
-using HandlerResult = std::variant<JobSucceeded, JobFailed>;
+// The outcome of an external effect cannot be determined (for example the
+// provider timed out after the request was sent). The job becomes UNKNOWN and
+// waits for reconciliation instead of being retried.
+struct JobUnknown {
+  std::string reason;
+};
+
+using HandlerResult = std::variant<JobSucceeded, JobFailed, JobUnknown>;
 
 // Executes one assignment. `lease_lost` is stop-requested when the lease can no
 // longer be renewed; the handler should then return as soon as it can, and its
@@ -38,6 +45,11 @@ struct WorkerOptions {
   Duration report_backoff = std::chrono::milliseconds{100};
   // Optional event log (acquired, reported, stale, gave up).
   LogFn log;
+  // Optional hooks at the points where failures matter most, used for fault
+  // injection: right after a job is acquired, and after the handler finished
+  // with the lease still held, immediately before the outcome is reported.
+  std::function<void(const Assignment&)> after_acquire;
+  std::function<void(const Assignment&)> before_report;
 };
 
 // One worker: acquires a job, renews its lease in the background every third

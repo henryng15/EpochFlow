@@ -9,7 +9,9 @@
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace epochflow::testing {
 namespace {
@@ -49,6 +51,21 @@ class FlakySource final : public WorkSource {
   }
   CommitStatus Fail(JobId id, Generation g, const std::string& r, bool retry) override {
     return inner_.Fail(id, g, r, retry);
+  }
+  CommitStatus MarkUnknown(JobId id, Generation g, const std::string& r) override {
+    return inner_.MarkUnknown(id, g, r);
+  }
+  OperationOutcome ApplyLedger(JobId id, Generation g, const std::string& op,
+                               const LedgerEntry& e) override {
+    return inner_.ApplyLedger(id, g, op, e);
+  }
+  ExternalBegin BeginExternal(JobId id, Generation g, const std::string& op,
+                              const std::string& req) override {
+    return inner_.BeginExternal(id, g, op, req);
+  }
+  CommitStatus ConfirmExternal(const std::string& op, const std::string& req,
+                               const std::string& conf) override {
+    return inner_.ConfirmExternal(op, req, conf);
   }
 
  private:
@@ -132,6 +149,41 @@ TEST_F(WorkerTest, RunSurvivesAcquireErrorsAndStopsOnRequest) {
   thread.request_stop();
   thread.join();
   SUCCEED();
+}
+
+
+TEST_F(WorkerTest, UnknownOutcomeParksTheJob) {
+  const JobId id = store_.Submit({"a", 3});
+  Worker worker(source_, [](const Assignment&, std::stop_token) -> HandlerResult {
+    return JobUnknown{"provider timed out"};
+  }, "w1", FastOptions());
+
+  worker.RunOnce();
+  const auto job = store_.Get(id);
+  EXPECT_EQ(job->state, JobState::kUnknown);
+  EXPECT_EQ(job->error, "provider timed out");
+}
+
+TEST_F(WorkerTest, HooksRunAfterAcquireAndBeforeReport) {
+  const JobId id = store_.Submit({"a", 3});
+  std::vector<std::string> events;
+  WorkerOptions options = FastOptions();
+  options.after_acquire = [&](const Assignment& a) {
+    events.push_back("acquired " + std::to_string(a.job_id));
+  };
+  options.before_report = [&](const Assignment& a) {
+    events.push_back("reporting " + std::to_string(a.job_id) + " state=" +
+                     std::string(ToString(store_.Get(a.job_id)->state)));
+  };
+  Worker worker(source_, [&](const Assignment&, std::stop_token) -> HandlerResult {
+    events.push_back("handler");
+    return JobSucceeded{"ok"};
+  }, "w1", options);
+
+  worker.RunOnce();
+  EXPECT_EQ(events, (std::vector<std::string>{"acquired " + std::to_string(id), "handler",
+                                              "reporting " + std::to_string(id) + " state=RUNNING"}));
+  EXPECT_EQ(store_.Get(id)->state, JobState::kCompleted);
 }
 
 }  // namespace

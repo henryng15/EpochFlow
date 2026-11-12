@@ -42,6 +42,35 @@ service Coordinator {
   // otherwise FAILED. A retried retryable failure that already re-queued the
   // job returns FAILED_PRECONDITION, which the worker treats as done.
   rpc FailJob(FailJobRequest) returns (FailJobResponse);
+
+  // Applies a ledger entry once per operation_id as part of the caller's
+  // assignment (fenced). Retries, later attempts, and duplicate jobs with the
+  // same operation_id and content get the original entry (deduplicated=true);
+  // different content is ALREADY_EXISTS. Safe to retry.
+  rpc ApplyLedgerOperation(ApplyLedgerOperationRequest) returns (ApplyLedgerOperationResponse);
+
+  // Records the intent to call an external system that has no idempotency key
+  // (fenced). The response says whether to call it (START), not to call it
+  // because an earlier attempt may have (IN_DOUBT), or that it was already
+  // confirmed (CONFIRMED). Safe to retry within the same attempt.
+  rpc BeginExternalOperation(BeginExternalOperationRequest)
+      returns (BeginExternalOperationResponse);
+
+  // Stores the external system's confirmation. Not fenced: the answer is
+  // recorded even from a stale attempt. Idempotent; a different confirmation
+  // is ALREADY_EXISTS.
+  rpc ConfirmExternalOperation(ConfirmExternalOperationRequest)
+      returns (ConfirmExternalOperationResponse);
+
+  // RUNNING -> UNKNOWN for the caller's generation: the outcome of an external
+  // effect cannot be determined. The job is not retried or reclaimed until
+  // ReconcileJob. Idempotent per generation and reason.
+  rpc MarkJobUnknown(MarkJobUnknownRequest) returns (MarkJobUnknownResponse);
+
+  // Operator decision: UNKNOWN -> COMPLETED or FAILED with evidence in
+  // `detail`. FAILED_PRECONDITION if the job is not UNKNOWN (repeating the same
+  // decision returns OK).
+  rpc ReconcileJob(ReconcileJobRequest) returns (ReconcileJobResponse);
 }
 
 enum JobState {
@@ -51,6 +80,13 @@ enum JobState {
   JOB_STATE_COMPLETED = 3;
   JOB_STATE_FAILED = 4;
   JOB_STATE_UNKNOWN = 5;
+}
+
+enum ExternalState {
+  EXTERNAL_STATE_UNSPECIFIED = 0;
+  EXTERNAL_STATE_START = 1;
+  EXTERNAL_STATE_IN_DOUBT = 2;
+  EXTERNAL_STATE_CONFIRMED = 3;
 }
 
 message Job {
@@ -137,3 +173,57 @@ message FailJobRequest {
 }
 
 message FailJobResponse {}
+
+message ApplyLedgerOperationRequest {
+  int64 job_id = 1;
+  int64 generation = 2;
+  // Stable across retries and attempts; required.
+  string operation_id = 3;
+  string account = 4;
+  int64 amount_cents = 5;
+}
+
+message ApplyLedgerOperationResponse {
+  string entry_id = 1;
+  bool deduplicated = 2;
+}
+
+message BeginExternalOperationRequest {
+  int64 job_id = 1;
+  int64 generation = 2;
+  string operation_id = 3;
+  // Canonical request content; reuse with different content is ALREADY_EXISTS.
+  string request = 4;
+}
+
+message BeginExternalOperationResponse {
+  ExternalState state = 1;
+  // Present when state is CONFIRMED.
+  string confirmation = 2;
+}
+
+message ConfirmExternalOperationRequest {
+  string operation_id = 1;
+  string request = 2;
+  string confirmation = 3;
+}
+
+message ConfirmExternalOperationResponse {}
+
+message MarkJobUnknownRequest {
+  int64 job_id = 1;
+  int64 generation = 2;
+  string reason = 3;
+}
+
+message MarkJobUnknownResponse {}
+
+message ReconcileJobRequest {
+  int64 job_id = 1;
+  // JOB_STATE_COMPLETED or JOB_STATE_FAILED; anything else is INVALID_ARGUMENT.
+  JobState outcome = 2;
+  // Result (COMPLETED) or error (FAILED), typically the evidence used.
+  string detail = 3;
+}
+
+message ReconcileJobResponse {}

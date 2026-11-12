@@ -177,5 +177,61 @@ TEST_F(CoordinatorGrpcTest, ShutdownStopsServing) {
   EXPECT_NE(CodeOf([&] { client.Acquire("w1"); }), grpc::StatusCode::OK);
 }
 
+
+TEST_F(CoordinatorGrpcTest, LedgerOperationsSurviveTheWire) {
+  const JobId id = client_->Submit({"pay", 3});
+  const auto a = client_->Acquire("w1");
+  const LedgerEntry payment{"alice", 1250};
+
+  const auto first = client_->ApplyLedger(id, a->generation, "order-7", payment);
+  EXPECT_EQ(first.status, CommitStatus::kAccepted);
+  EXPECT_FALSE(first.deduplicated);
+  const auto again = client_->ApplyLedger(id, a->generation, "order-7", payment);
+  EXPECT_TRUE(again.deduplicated);
+  EXPECT_EQ(again.result, first.result);
+  EXPECT_EQ(client_->ApplyLedger(id, a->generation, "order-7", LedgerEntry{"alice", 1}).status,
+            CommitStatus::kConflict);
+  EXPECT_EQ(client_->ApplyLedger(id, a->generation + 1, "order-8", payment).status,
+            CommitStatus::kStale);
+  EXPECT_EQ(CodeOf([&] { client_->ApplyLedger(id, a->generation, "", payment); }),
+            grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_F(CoordinatorGrpcTest, ExternalOperationsSurviveTheWire) {
+  const JobId id = client_->Submit({"charge", 3});
+  const auto first = client_->Acquire("w1");
+  const auto begin = client_->BeginExternal(id, first->generation, "charge-1", "req");
+  EXPECT_EQ(begin.status, CommitStatus::kAccepted);
+  EXPECT_EQ(begin.state, ExternalState::kStart);
+
+  clock_.Advance(kLease + seconds{1});
+  ASSERT_EQ(store_.ReclaimExpired(), 1u);
+  const auto second = client_->Acquire("w2");
+  EXPECT_EQ(client_->BeginExternal(id, second->generation, "charge-1", "req").state,
+            ExternalState::kInDoubt);
+
+  EXPECT_EQ(client_->ConfirmExternal("charge-1", "req", "ch_1"), CommitStatus::kAccepted);
+  const auto confirmed = client_->BeginExternal(id, second->generation, "charge-1", "req");
+  EXPECT_EQ(confirmed.state, ExternalState::kConfirmed);
+  EXPECT_EQ(confirmed.result, "ch_1");
+  EXPECT_EQ(client_->ConfirmExternal("charge-1", "req", "ch_2"), CommitStatus::kConflict);
+  EXPECT_EQ(client_->ConfirmExternal("nope", "req", "ch_1"), CommitStatus::kNotFound);
+}
+
+TEST_F(CoordinatorGrpcTest, UnknownAndReconcileSurviveTheWire) {
+  const JobId id = client_->Submit({"charge", 3});
+  const auto a = client_->Acquire("w1");
+  EXPECT_EQ(client_->Reconcile(id, JobState::kCompleted, "x"), CommitStatus::kStale);
+
+  EXPECT_EQ(client_->MarkUnknown(id, a->generation, "timeout"), CommitStatus::kAccepted);
+  EXPECT_EQ(client_->Get(id)->state, JobState::kUnknown);
+  EXPECT_EQ(CodeOf([&] { client_->Reconcile(id, JobState::kRunning, "x"); }),
+            grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(client_->Reconcile(id, JobState::kCompleted, "ch_9"), CommitStatus::kAccepted);
+  const auto job = client_->Get(id);
+  EXPECT_EQ(job->state, JobState::kCompleted);
+  EXPECT_EQ(job->result, "ch_9");
+}
+
 }  // namespace
 }  // namespace epochflow::testing

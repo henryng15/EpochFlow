@@ -99,4 +99,85 @@ grpc::Status CoordinatorService::FailJob(grpc::ServerContext*, const v1::FailJob
   });
 }
 
+grpc::Status CoordinatorService::ApplyLedgerOperation(
+    grpc::ServerContext*, const v1::ApplyLedgerOperationRequest* req,
+    v1::ApplyLedgerOperationResponse* resp) {
+  return Guard(log_, "ApplyLedgerOperation", [&] {
+    const OperationOutcome o = store_.ApplyLedger(req->job_id(), req->generation(),
+                                                  req->operation_id(),
+                                                  LedgerEntry{req->account(), req->amount_cents()});
+    if (o.status == CommitStatus::kAccepted) {
+      resp->set_entry_id(o.result);
+      resp->set_deduplicated(o.deduplicated);
+      if (log_ && o.deduplicated) {
+        log_(std::format("deduplicated operation={} job={} generation={} entry={}",
+                         req->operation_id(), req->job_id(), req->generation(), o.result));
+      }
+    } else if (log_) {
+      log_(std::format("rejected operation={} job={} generation={} status={}",
+                       req->operation_id(), req->job_id(), req->generation(),
+                       ToString(o.status)));
+    }
+    return rpc::ToStatus(o.status);
+  });
+}
+
+grpc::Status CoordinatorService::BeginExternalOperation(
+    grpc::ServerContext*, const v1::BeginExternalOperationRequest* req,
+    v1::BeginExternalOperationResponse* resp) {
+  return Guard(log_, "BeginExternalOperation", [&] {
+    const ExternalBegin b = store_.BeginExternal(req->job_id(), req->generation(),
+                                                 req->operation_id(), req->request());
+    if (b.status == CommitStatus::kAccepted) {
+      resp->set_state(rpc::ToProto(b.state));
+      resp->set_confirmation(b.result);
+      if (log_ && b.state == ExternalState::kInDoubt) {
+        log_(std::format("in doubt operation={} job={} generation={}", req->operation_id(),
+                         req->job_id(), req->generation()));
+      }
+    }
+    return rpc::ToStatus(b.status);
+  });
+}
+
+grpc::Status CoordinatorService::ConfirmExternalOperation(
+    grpc::ServerContext*, const v1::ConfirmExternalOperationRequest* req,
+    v1::ConfirmExternalOperationResponse*) {
+  return Guard(log_, "ConfirmExternalOperation", [&] {
+    return rpc::ToStatus(
+        store_.ConfirmExternal(req->operation_id(), req->request(), req->confirmation()));
+  });
+}
+
+grpc::Status CoordinatorService::MarkJobUnknown(grpc::ServerContext*,
+                                                const v1::MarkJobUnknownRequest* req,
+                                                v1::MarkJobUnknownResponse*) {
+  return Guard(log_, "MarkJobUnknown", [&] {
+    const CommitStatus s = store_.MarkUnknown(req->job_id(), req->generation(), req->reason());
+    if (log_ && s == CommitStatus::kAccepted) {
+      log_(std::format("unknown job={} generation={} reason={}", req->job_id(), req->generation(),
+                       req->reason()));
+    }
+    return rpc::ToStatus(s);
+  });
+}
+
+grpc::Status CoordinatorService::ReconcileJob(grpc::ServerContext*,
+                                              const v1::ReconcileJobRequest* req,
+                                              v1::ReconcileJobResponse*) {
+  return Guard(log_, "ReconcileJob", [&] {
+    // FromProto throws std::invalid_argument for unspecified states and the
+    // store for non-terminal ones; both become INVALID_ARGUMENT.
+    const JobState outcome = rpc::FromProto(req->outcome());
+    const CommitStatus s = store_.Reconcile(req->job_id(), outcome, req->detail());
+    if (log_ && s == CommitStatus::kAccepted) {
+      log_(std::format("reconciled job={} outcome={}", req->job_id(), ToString(outcome)));
+    }
+    if (s == CommitStatus::kStale) {
+      return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "job is not UNKNOWN"};
+    }
+    return rpc::ToStatus(s);
+  });
+}
+
 }  // namespace epochflow

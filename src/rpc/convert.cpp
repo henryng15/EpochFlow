@@ -40,6 +40,31 @@ JobState FromProto(v1::JobState state) {
   }
 }
 
+v1::ExternalState ToProto(ExternalState state) {
+  switch (state) {
+    case ExternalState::kStart:
+      return v1::EXTERNAL_STATE_START;
+    case ExternalState::kInDoubt:
+      return v1::EXTERNAL_STATE_IN_DOUBT;
+    case ExternalState::kConfirmed:
+      return v1::EXTERNAL_STATE_CONFIRMED;
+  }
+  return v1::EXTERNAL_STATE_UNSPECIFIED;
+}
+
+ExternalState FromProto(v1::ExternalState state) {
+  switch (state) {
+    case v1::EXTERNAL_STATE_START:
+      return ExternalState::kStart;
+    case v1::EXTERNAL_STATE_IN_DOUBT:
+      return ExternalState::kInDoubt;
+    case v1::EXTERNAL_STATE_CONFIRMED:
+      return ExternalState::kConfirmed;
+    default:
+      throw std::invalid_argument("unsupported external state on the wire");
+  }
+}
+
 std::int64_t ToUnixMs(TimePoint t) {
   return std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count();
 }

@@ -38,6 +38,18 @@ class CoordinatorService final : public v1::Coordinator::Service {
                            v1::CompleteJobResponse*) override;
   grpc::Status FailJob(grpc::ServerContext*, const v1::FailJobRequest*,
                        v1::FailJobResponse*) override;
+  grpc::Status ApplyLedgerOperation(grpc::ServerContext*, const v1::ApplyLedgerOperationRequest*,
+                                    v1::ApplyLedgerOperationResponse*) override;
+  grpc::Status BeginExternalOperation(grpc::ServerContext*,
+                                      const v1::BeginExternalOperationRequest*,
+                                      v1::BeginExternalOperationResponse*) override;
+  grpc::Status ConfirmExternalOperation(grpc::ServerContext*,
+                                        const v1::ConfirmExternalOperationRequest*,
+                                        v1::ConfirmExternalOperationResponse*) override;
+  grpc::Status MarkJobUnknown(grpc::ServerContext*, const v1::MarkJobUnknownRequest*,
+                              v1::MarkJobUnknownResponse*) override;
+  grpc::Status ReconcileJob(grpc::ServerContext*, const v1::ReconcileJobRequest*,
+                            v1::ReconcileJobResponse*) override;
 
  private:
   JobStore& store_;
