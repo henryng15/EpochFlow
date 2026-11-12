@@ -24,6 +24,8 @@ std::string_view ToString(ExternalState state) {
       return "IN_DOUBT";
     case ExternalState::kConfirmed:
       return "CONFIRMED";
+    case ExternalState::kFailed:
+      return "FAILED";
   }
   return "INVALID";
 }

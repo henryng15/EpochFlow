@@ -81,6 +81,7 @@ class JobStore {
   //    -> kStart again;
   //  - intent recorded by another attempt or job, never confirmed -> kInDoubt;
   //  - already confirmed -> kConfirmed with the provider's answer;
+  //  - reconciled as never performed -> kFailed with the operator's evidence;
   //  - different request, or a ledger operation with that id -> kConflict.
   // Throws std::invalid_argument for an empty operation_id.
   virtual ExternalBegin BeginExternal(JobId id, Generation generation,
@@ -91,8 +92,9 @@ class JobStore {
   // Deliberately not fenced: the provider's answer is a fact about the outside
   // world, worth keeping even if the reporting attempt has gone stale, because
   // it lets later attempts finish instead of becoming UNKNOWN. Idempotent for
-  // the same confirmation; kConflict for a different one or a different
-  // request; kNotFound for an unknown operation.
+  // the same confirmation; kConflict for a different one, a different
+  // request, or an operation reconciled as never performed; kNotFound for an
+  // unknown operation.
   virtual CommitStatus ConfirmExternal(const std::string& operation_id,
                                        const std::string& request,
                                        const std::string& confirmation) = 0;
@@ -110,6 +112,22 @@ class JobStore {
   // same decision is kAccepted; any other job state is kStale. Throws
   // std::invalid_argument unless `outcome` is kCompleted or kFailed.
   virtual CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) = 0;
+
+  // Operator decision for an UNKNOWN job and the external operation it
+  // created, applied to both in one atomic step (ADR 0006):
+  //   kCompleted: operation STARTED -> CONFIRMED with `evidence` as its result
+  //               (or already CONFIRMED with exactly `evidence`); job ->
+  //               COMPLETED with `evidence` as its result.
+  //   kFailed:    operation STARTED -> FAILED with `evidence`; job -> FAILED
+  //               with `evidence` as its error.
+  // Repeating the decision that resolved the pair is kAccepted. Returns
+  // kNotFound for an unknown job or operation; kConflict if the operation is
+  // not an EXTERNAL operation created by this job, or the decision contradicts
+  // an existing confirmation; kStale if the job is not UNKNOWN. A rejected call
+  // changes nothing. Throws std::invalid_argument for an empty operation id or
+  // an outcome other than kCompleted or kFailed.
+  virtual CommitStatus ReconcileExternal(JobId id, const std::string& operation_id,
+                                         JobState outcome, const std::string& evidence) = 0;
 
   // Recovers every RUNNING job whose lease deadline is strictly in the past:
   // PENDING if attempts remain, otherwise FAILED. The generation is unchanged;

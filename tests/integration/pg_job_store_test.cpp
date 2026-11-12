@@ -366,5 +366,66 @@ TEST_F(PgJobStoreTest, InvariantCheckerReportsCompletionWithUnconfirmedExternalO
                                      std::to_string(id) + "|operation charge-1 is STARTED"});
 }
 
+// An UNKNOWN job with an unresolved external intent, as the worker leaves it
+// after a provider timeout.
+JobId UnknownExternalJob(PgJobStore& store, const std::string& op) {
+  const JobId id = store.Submit({"task=external;op=" + op, 3});
+  const auto a = store.Acquire("w", seconds{30});
+  store.BeginExternal(id, a->generation, op, "req");
+  store.MarkUnknown(id, a->generation, "provider timed out");
+  return id;
+}
+
+TEST_F(PgJobStoreTest, FailedReconciliationLeavesJobAndOperationUnchanged) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  const JobId id = UnknownExternalJob(store, "charge-1");
+  pqxx::connection conn{Dsn()};
+  {
+    // The operation row is updated first; make the job update that follows fail.
+    pqxx::work tx{conn};
+    tx.exec("CREATE FUNCTION reject_job_update() RETURNS trigger LANGUAGE plpgsql AS "
+            "$$ BEGIN RAISE EXCEPTION 'injected failure'; END $$");
+    tx.exec("CREATE TRIGGER reject_job_update BEFORE UPDATE ON jobs FOR EACH ROW "
+            "EXECUTE FUNCTION reject_job_update()");
+    tx.commit();
+  }
+  EXPECT_THROW(store.ReconcileExternal(id, "charge-1", JobState::kCompleted, "ch_9"),
+               std::exception);
+  {
+    pqxx::work tx{conn};
+    tx.exec("DROP TRIGGER reject_job_update ON jobs");
+    tx.commit();
+  }
+  pqxx::read_transaction tx{conn};
+  EXPECT_EQ(tx.query_value<std::string>(
+                "SELECT status || '|' || (reconciled_at IS NULL) FROM operations "
+                "WHERE operation_id = 'charge-1'"),
+            "STARTED|true");
+  EXPECT_EQ(store.Get(id)->state, JobState::kUnknown);
+}
+
+TEST_F(PgJobStoreTest, ReconciliationIsRecordedOnTheOperation) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  const JobId paid = UnknownExternalJob(store, "charge-1");
+  const JobId unpaid = UnknownExternalJob(store, "charge-2");
+  ASSERT_EQ(store.ReconcileExternal(paid, "charge-1", JobState::kCompleted, "ch_9"),
+            CommitStatus::kAccepted);
+  ASSERT_EQ(store.ReconcileExternal(unpaid, "charge-2", JobState::kFailed, "no charge"),
+            CommitStatus::kAccepted);
+
+  pqxx::connection conn{Dsn()};
+  pqxx::read_transaction tx{conn};
+  std::vector<std::string> rows;
+  for (const auto& [op, status, result] : tx.query<std::string, std::string, std::string>(
+           "SELECT operation_id, status, result FROM operations "
+           "WHERE reconciled_at IS NOT NULL ORDER BY operation_id")) {
+    rows.push_back(op + ":" + status + ":" + result);
+  }
+  EXPECT_EQ(rows, (std::vector<std::string>{"charge-1:CONFIRMED:ch_9", "charge-2:FAILED:no charge"}));
+  EXPECT_EQ(InvariantViolations(Dsn()), std::vector<std::string>{});
+}
+
 }  // namespace
 }  // namespace epochflow::testing

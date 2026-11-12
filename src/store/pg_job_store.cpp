@@ -329,6 +329,9 @@ ExternalBegin PgJobStore::BeginExternal(JobId id, Generation generation,
   if (r[2].view() == "CONFIRMED") {
     return {CommitStatus::kAccepted, ExternalState::kConfirmed, r[5].as<std::string>()};
   }
+  if (r[2].view() == "FAILED") {
+    return {CommitStatus::kAccepted, ExternalState::kFailed, r[5].as<std::string>()};
+  }
   const bool same_attempt = r[3].as<JobId>() == id && r[4].as<Generation>() == generation;
   return {CommitStatus::kAccepted, same_attempt ? ExternalState::kStart : ExternalState::kInDoubt,
           {}};
@@ -409,6 +412,62 @@ CommitStatus PgJobStore::Reconcile(JobId id, JobState outcome, const std::string
   }
   tx.commit();
   return status;
+}
+
+CommitStatus PgJobStore::ReconcileExternal(JobId id, const std::string& operation_id,
+                                           JobState outcome, const std::string& evidence) {
+  if (operation_id.empty()) throw std::invalid_argument("operation_id is required");
+  if (outcome != JobState::kCompleted && outcome != JobState::kFailed) {
+    throw std::invalid_argument("reconcile outcome must be COMPLETED or FAILED");
+  }
+  const bool completed = outcome == JobState::kCompleted;
+  const std::string_view resolved = completed ? "CONFIRMED" : "FAILED";
+  auto conn = pool_.Acquire();
+  pqxx::work tx{*conn};
+  // Lock the job, then the operation (the only path that holds both, so the
+  // order cannot deadlock). Both rows are decided and updated in this one
+  // transaction: a failure anywhere rolls both back (ADR 0006).
+  const pqxx::result job = tx.exec(
+      "SELECT state, result, error FROM jobs WHERE job_id = $1 FOR UPDATE", pqxx::params{id});
+  if (job.empty()) return CommitStatus::kNotFound;
+  const pqxx::result op = tx.exec(
+      "SELECT kind, job_id, status, result FROM operations WHERE operation_id = $1 FOR UPDATE",
+      pqxx::params{operation_id});
+  if (op.empty()) return CommitStatus::kNotFound;
+  const pqxx::row_ref j = job[0];
+  const pqxx::row_ref o = op[0];
+  if (o[0].view() != "EXTERNAL" || o[1].as<JobId>() != id) return CommitStatus::kConflict;
+  const bool op_has_evidence = o[2].view() == resolved && !o[3].is_null() && o[3].view() == evidence;
+
+  if (j[0].view() != "UNKNOWN") {
+    // Repeating the decision that resolved the pair is idempotent.
+    const bool job_same =
+        completed ? j[0].view() == "COMPLETED" && ToString(j[1].as<pqxx::bytes>()) == evidence
+                  : j[0].view() == "FAILED" && !j[2].is_null() && j[2].view() == evidence;
+    return job_same && op_has_evidence ? CommitStatus::kAccepted : CommitStatus::kStale;
+  }
+  if (o[2].view() == "STARTED") {
+    tx.exec("UPDATE operations SET status = $2, result = $3, reconciled_at = now(), "
+            "updated_at = now() WHERE operation_id = $1",
+            pqxx::params{operation_id, resolved, evidence});
+  } else if (completed && op_has_evidence) {
+    // A confirmation landed after the job became UNKNOWN; the operator agrees.
+    tx.exec("UPDATE operations SET reconciled_at = now(), updated_at = now() "
+            "WHERE operation_id = $1",
+            pqxx::params{operation_id});
+  } else {
+    return CommitStatus::kConflict;  // contradicts what is already recorded
+  }
+  if (completed) {
+    tx.exec("UPDATE jobs SET state = 'COMPLETED', result = $2, updated_at = now() "
+            "WHERE job_id = $1",
+            pqxx::params{id, pqxx::binary_cast(evidence)});
+  } else {
+    tx.exec("UPDATE jobs SET state = 'FAILED', error = $2, updated_at = now() WHERE job_id = $1",
+            pqxx::params{id, evidence});
+  }
+  tx.commit();
+  return CommitStatus::kAccepted;
 }
 
 std::size_t PgJobStore::ReclaimExpired() {

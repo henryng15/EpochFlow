@@ -50,6 +50,8 @@ class PgJobStore final : public JobStore {
                                const std::string& confirmation) override;
   CommitStatus MarkUnknown(JobId id, Generation generation, const std::string& reason) override;
   CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) override;
+  CommitStatus ReconcileExternal(JobId id, const std::string& operation_id, JobState outcome,
+                                 const std::string& evidence) override;
   std::size_t ReclaimExpired() override;
 
  private:

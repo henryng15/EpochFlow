@@ -709,5 +709,118 @@ TEST_P(JobStoreContractTest, ReconcileRejectsNonTerminalOutcome) {
   EXPECT_THROW(store().Reconcile(id, JobState::kUnknown, "x"), std::invalid_argument);
 }
 
+// --- Operation-level reconciliation (ADR 0006) ---------------------------------
+
+constexpr const char* kOp = "charge-1";
+constexpr const char* kReq = "account=alice;amount_cents=500";
+
+// A job whose external call was started and whose outcome is unknown.
+JobId UnknownWithIntent(JobStore& store) {
+  const JobId id = store.Submit(JobSpec{"charge", 3});
+  const auto a = store.Acquire("w1", kLease);
+  EXPECT_EQ(a->job_id, id);
+  EXPECT_EQ(store.BeginExternal(id, a->generation, kOp, kReq).state, ExternalState::kStart);
+  EXPECT_EQ(store.MarkUnknown(id, a->generation, "provider timed out"), CommitStatus::kAccepted);
+  return id;
+}
+
+// What a later job using the same operation id is told.
+ExternalBegin BeginFromNewJob(JobStore& store) {
+  const JobId id = store.Submit(JobSpec{"retry", 3});
+  const auto a = store.Acquire("w2", kLease);
+  EXPECT_EQ(a->job_id, id);
+  return store.BeginExternal(id, a->generation, kOp, kReq);
+}
+
+TEST_P(JobStoreContractTest, ReconcileExternalConfirmsTheOperationAndCompletesTheJob) {
+  const JobId id = UnknownWithIntent(store());
+  ASSERT_EQ(store().ReconcileExternal(id, kOp, JobState::kCompleted, "ch_9"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().Get(id)->state, JobState::kCompleted);
+  EXPECT_EQ(store().Get(id)->result, "ch_9");
+  // A later attempt reuses the operator's evidence instead of being in doubt.
+  const auto later = BeginFromNewJob(store());
+  EXPECT_EQ(later.state, ExternalState::kConfirmed);
+  EXPECT_EQ(later.result, "ch_9");
+}
+
+TEST_P(JobStoreContractTest, ReconcileExternalAsFailedMakesTheOperationTerminal) {
+  const JobId id = UnknownWithIntent(store());
+  ASSERT_EQ(store().ReconcileExternal(id, kOp, JobState::kFailed, "provider has no charge"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().Get(id)->state, JobState::kFailed);
+  EXPECT_EQ(store().Get(id)->error, "provider has no charge");
+  // Reusing the id replays the failure; a provider answer now contradicts it.
+  const auto later = BeginFromNewJob(store());
+  EXPECT_EQ(later.status, CommitStatus::kAccepted);
+  EXPECT_EQ(later.state, ExternalState::kFailed);
+  EXPECT_EQ(later.result, "provider has no charge");
+  EXPECT_EQ(store().ConfirmExternal(kOp, kReq, "ch_1"), CommitStatus::kConflict);
+}
+
+TEST_P(JobStoreContractTest, ReconcileExternalIsIdempotentAndRejectsOtherDecisions) {
+  const JobId id = UnknownWithIntent(store());
+  ASSERT_EQ(store().ReconcileExternal(id, kOp, JobState::kCompleted, "ch_9"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().ReconcileExternal(id, kOp, JobState::kCompleted, "ch_9"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().ReconcileExternal(id, kOp, JobState::kCompleted, "ch_8"),
+            CommitStatus::kStale);
+  EXPECT_EQ(store().ReconcileExternal(id, kOp, JobState::kFailed, "ch_9"), CommitStatus::kStale);
+  EXPECT_EQ(store().Get(id)->result, "ch_9");
+  EXPECT_EQ(BeginFromNewJob(store()).result, "ch_9");
+}
+
+TEST_P(JobStoreContractTest, ReconcileExternalMustAgreeWithALateConfirmation) {
+  const JobId id = UnknownWithIntent(store());
+  // The worker's confirmation arrived after it had already reported UNKNOWN.
+  ASSERT_EQ(store().ConfirmExternal(kOp, kReq, "ch_1"), CommitStatus::kAccepted);
+
+  EXPECT_EQ(store().ReconcileExternal(id, kOp, JobState::kCompleted, "ch_2"),
+            CommitStatus::kConflict);
+  EXPECT_EQ(store().ReconcileExternal(id, kOp, JobState::kFailed, "no charge"),
+            CommitStatus::kConflict);
+  EXPECT_EQ(store().Get(id)->state, JobState::kUnknown);
+
+  EXPECT_EQ(store().ReconcileExternal(id, kOp, JobState::kCompleted, "ch_1"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(store().Get(id)->state, JobState::kCompleted);
+}
+
+TEST_P(JobStoreContractTest, ReconcileExternalRequiresThisJobsExternalOperation) {
+  const JobId id = UnknownWithIntent(store());
+  // An unrelated UNKNOWN job may not resolve someone else's operation.
+  const JobId other = store().Submit(Spec("other"));
+  const auto o = store().Acquire("w3", kLease);
+  store().ApplyLedger(other, o->generation, "ledger-1", LedgerEntry{"bob", 1});
+  store().MarkUnknown(other, o->generation, "timeout");
+
+  EXPECT_EQ(store().ReconcileExternal(other, kOp, JobState::kCompleted, "ch_9"),
+            CommitStatus::kConflict);
+  EXPECT_EQ(store().ReconcileExternal(other, "ledger-1", JobState::kCompleted, "ch_9"),
+            CommitStatus::kConflict);
+  EXPECT_EQ(store().ReconcileExternal(other, "missing", JobState::kCompleted, "ch_9"),
+            CommitStatus::kNotFound);
+  EXPECT_EQ(store().ReconcileExternal(987654, kOp, JobState::kCompleted, "ch_9"),
+            CommitStatus::kNotFound);
+  EXPECT_THROW(store().ReconcileExternal(id, "", JobState::kCompleted, "x"),
+               std::invalid_argument);
+  EXPECT_THROW(store().ReconcileExternal(id, kOp, JobState::kUnknown, "x"),
+               std::invalid_argument);
+  // Nothing changed: the intent is still unresolved.
+  EXPECT_EQ(store().Get(id)->state, JobState::kUnknown);
+  EXPECT_EQ(store().Get(other)->state, JobState::kUnknown);
+  EXPECT_EQ(BeginFromNewJob(store()).state, ExternalState::kInDoubt);
+}
+
+TEST_P(JobStoreContractTest, ReconcileExternalOnlyResolvesUnknownJobs) {
+  const JobId id = store().Submit(JobSpec{"charge", 3});
+  const auto a = store().Acquire("w1", kLease);
+  store().BeginExternal(id, a->generation, kOp, kReq);
+  EXPECT_EQ(store().ReconcileExternal(id, kOp, JobState::kCompleted, "ch_9"),
+            CommitStatus::kStale);  // RUNNING
+  EXPECT_EQ(store().Get(id)->state, JobState::kRunning);
+}
+
 }  // namespace
 }  // namespace epochflow::testing

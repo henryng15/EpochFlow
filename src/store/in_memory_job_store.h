@@ -35,6 +35,8 @@ class InMemoryJobStore final : public JobStore {
                                const std::string& confirmation) override;
   CommitStatus MarkUnknown(JobId id, Generation generation, const std::string& reason) override;
   CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) override;
+  CommitStatus ReconcileExternal(JobId id, const std::string& operation_id, JobState outcome,
+                                 const std::string& evidence) override;
   std::size_t ReclaimExpired() override;
 
  private:
@@ -43,7 +45,7 @@ class InMemoryJobStore final : public JobStore {
   struct Operation {
     std::string kind;     // "LEDGER" or "EXTERNAL"
     std::string request;  // canonical content, compared on reuse
-    std::string status;   // "APPLIED", "STARTED", or "CONFIRMED"
+    std::string status;   // "APPLIED", "STARTED", "CONFIRMED", or "FAILED"
     JobId job_id = 0;
     Generation generation = 0;
     std::string result;   // ledger entry id, or provider confirmation

@@ -96,6 +96,10 @@ enum class ExternalState {
   kInDoubt,
   // An earlier call was confirmed; `result` holds the provider's answer.
   kConfirmed,
+  // An operator established that the provider never performed the effect
+  // (ADR 0006); `result` holds that evidence. Do not call the provider: the
+  // job fails without retry. Charging again needs a new operation id.
+  kFailed,
 };
 
 std::string_view ToString(ExternalState state);
@@ -104,7 +108,8 @@ struct ExternalBegin {
   CommitStatus status = CommitStatus::kNotFound;
   // Meaningful only when status is kAccepted.
   ExternalState state = ExternalState::kStart;
-  // Provider confirmation when state is kConfirmed.
+  // Provider confirmation when state is kConfirmed; the operator's evidence
+  // when state is kFailed.
   std::string result;
 };
 

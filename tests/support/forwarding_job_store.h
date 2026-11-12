@@ -42,6 +42,10 @@ class ForwardingJobStore : public JobStore {
   CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) override {
     return inner_.Reconcile(id, outcome, detail);
   }
+  CommitStatus ReconcileExternal(JobId id, const std::string& op, JobState outcome,
+                                 const std::string& evidence) override {
+    return inner_.ReconcileExternal(id, op, outcome, evidence);
+  }
   std::size_t ReclaimExpired() override { return inner_.ReclaimExpired(); }
 
  protected:

@@ -163,6 +163,7 @@ ExternalBegin InMemoryJobStore::BeginExternal(JobId id, Generation generation,
     return {CommitStatus::kConflict, ExternalState::kStart, {}};
   }
   if (op.status == "CONFIRMED") return {CommitStatus::kAccepted, ExternalState::kConfirmed, op.result};
+  if (op.status == "FAILED") return {CommitStatus::kAccepted, ExternalState::kFailed, op.result};
   const bool same_attempt = op.job_id == id && op.generation == generation;
   return {CommitStatus::kAccepted, same_attempt ? ExternalState::kStart : ExternalState::kInDoubt,
           {}};
@@ -179,6 +180,8 @@ CommitStatus InMemoryJobStore::ConfirmExternal(const std::string& operation_id,
   if (op.status == "CONFIRMED") {
     return op.result == confirmation ? CommitStatus::kAccepted : CommitStatus::kConflict;
   }
+  // An operator proved the effect never happened; a confirmation contradicts it.
+  if (op.status == "FAILED") return CommitStatus::kConflict;
   op.status = "CONFIRMED";
   op.result = confirmation;
   return CommitStatus::kAccepted;
@@ -217,6 +220,43 @@ CommitStatus InMemoryJobStore::Reconcile(JobId id, JobState outcome, const std::
   const auto& recorded = outcome == JobState::kCompleted ? job.result : job.error;
   return job.state == outcome && recorded == detail ? CommitStatus::kAccepted
                                                     : CommitStatus::kStale;
+}
+
+CommitStatus InMemoryJobStore::ReconcileExternal(JobId id, const std::string& operation_id,
+                                                 JobState outcome, const std::string& evidence) {
+  if (operation_id.empty()) throw std::invalid_argument("operation_id is required");
+  if (outcome != JobState::kCompleted && outcome != JobState::kFailed) {
+    throw std::invalid_argument("reconcile outcome must be COMPLETED or FAILED");
+  }
+  const bool completed = outcome == JobState::kCompleted;
+  const std::string resolved = completed ? "CONFIRMED" : "FAILED";
+  // Everything below runs under one lock: both records change, or neither.
+  std::lock_guard lock(mu_);
+  const auto job_it = jobs_.find(id);
+  if (job_it == jobs_.end()) return CommitStatus::kNotFound;
+  const auto op_it = operations_.find(operation_id);
+  if (op_it == operations_.end()) return CommitStatus::kNotFound;
+  JobRecord& job = job_it->second;
+  Operation& op = op_it->second;
+  if (op.kind != "EXTERNAL" || op.job_id != id) return CommitStatus::kConflict;
+
+  if (job.state != JobState::kUnknown) {
+    // Repeating the decision that resolved the pair is idempotent.
+    const auto& recorded = completed ? job.result : job.error;
+    const bool same = job.state == outcome && recorded == evidence && op.status == resolved &&
+                      op.result == evidence;
+    return same ? CommitStatus::kAccepted : CommitStatus::kStale;
+  }
+  if (op.status == "STARTED") {
+    op.status = resolved;
+    op.result = evidence;
+  } else if (!(op.status == "CONFIRMED" && completed && op.result == evidence)) {
+    // The evidence contradicts what is already recorded for the operation.
+    return CommitStatus::kConflict;
+  }
+  TransitionTo(job, outcome);
+  (completed ? job.result : job.error) = evidence;
+  return CommitStatus::kAccepted;
 }
 
 std::size_t InMemoryJobStore::ReclaimExpired() {
