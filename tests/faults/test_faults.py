@@ -12,164 +12,19 @@ Exits 77 (skipped) when EPOCHFLOW_DSN or psql is missing. Standard library only.
 
 import functools
 import os
-import re
 import shutil
 import signal
-import subprocess
 import sys
-import tempfile
 import time
 import unittest
 
 BIN = os.environ.get("EPOCHFLOW_BIN", "")
 DSN = os.environ.get("EPOCHFLOW_DSN", "")
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CHECKER = os.path.join(REPO, "scripts", "check-invariants.sql")
+sys.path.insert(0, os.path.join(REPO, "scripts"))
+from epochflow_cluster import TIMEOUT_S, Cluster  # noqa: E402
 
 LEASE_MS = 1500
-RECLAIM_MS = 100
-TIMEOUT_S = 30
-
-
-class Cluster:
-    """One coordinator, its workers, a private schema, and a provider log."""
-
-    _counter = 0
-
-    def __init__(self):
-        Cluster._counter += 1
-        self.schema = f"faults_{os.getpid()}_{Cluster._counter}"
-        self.dir = tempfile.mkdtemp(prefix="epochflow-faults-")
-        self.provider_log = os.path.join(self.dir, "provider.log")
-        self.dsn = f"{DSN} options='-csearch_path={self.schema}'"
-        self.processes = {}
-        self.files = []
-        self.coordinator = None
-        self.address = None
-        self.psql(f"CREATE SCHEMA {self.schema}", dsn=DSN)
-
-    # --- processes -------------------------------------------------------
-
-    def open(self, name, mode):
-        f = open(os.path.join(self.dir, name), mode)
-        self.files.append(f)
-        return f
-
-    def read(self, name):
-        with open(os.path.join(self.dir, name)) as f:
-            return f.read()
-
-    def start_coordinator(self, listen="127.0.0.1:0"):
-        self.coordinator = subprocess.Popen(
-            [f"{BIN}/epochflow-coordinator", f"--listen={listen}", f"--dsn={self.dsn}",
-             f"--lease-ms={LEASE_MS}", f"--reclaim-interval-ms={RECLAIM_MS}"],
-            stdout=self.open("coordinator.out", "w"), stderr=self.open("coordinator.log", "a"))
-        self.wait_for(lambda: "listening on" in self.read("coordinator.out"),
-                      "coordinator to listen")
-        self.address = re.search(r"listening on (\S+)", self.read("coordinator.out")).group(1)
-
-    def kill_coordinator(self):
-        self.coordinator.kill()
-        self.coordinator.wait()
-
-    def start_worker(self, name, fault=None, work_ms=0):
-        args = [f"{BIN}/epochflow-worker", f"--coordinator={self.address}", f"--worker-id={name}",
-                f"--provider-log={self.provider_log}", "--idle-backoff-ms=20",
-                "--rpc-timeout-ms=500", f"--work-ms={work_ms}"]
-        if fault:
-            args.append(f"--fault={fault}")
-        proc = subprocess.Popen(args, stderr=self.open(f"{name}.log", "a"))
-        self.processes[name] = proc
-        return proc
-
-    def log(self, name):
-        return self.read(f"{name}.log")
-
-    def state(self, name):
-        """Kernel process state letter: 'T' when stopped by SIGSTOP."""
-        with open(f"/proc/{self.processes[name].pid}/stat") as f:
-            return f.read().rsplit(")", 1)[1].split()[0]
-
-    def close(self):
-        procs = list(self.processes.values()) + ([self.coordinator] if self.coordinator else [])
-        for p in procs:
-            if p.poll() is None:
-                os.kill(p.pid, signal.SIGCONT)
-                p.kill()
-            p.wait()
-        for f in self.files:
-            f.close()
-        self.psql(f"DROP SCHEMA IF EXISTS {self.schema} CASCADE", dsn=DSN)
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def logs(self):
-        out = []
-        for name in sorted(os.listdir(self.dir)):
-            if name.endswith(".log"):
-                with open(os.path.join(self.dir, name)) as f:
-                    out.append(f"--- {name}\n{f.read()[-4000:]}")
-        return "\n".join(out)
-
-    # --- client and database ----------------------------------------------
-
-    def ctl(self, *args, check=True):
-        r = subprocess.run([f"{BIN}/epochflowctl", f"--coordinator={self.address}", *args],
-                           capture_output=True, text=True, timeout=TIMEOUT_S)
-        if check and r.returncode != 0:
-            raise AssertionError(f"epochflowctl {args} failed ({r.returncode}): {r.stderr}")
-        return r
-
-    def submit(self, payload, count=1):
-        return [int(x) for x in self.ctl("submit", f"--payload={payload}",
-                                         f"--count={count}").stdout.split()]
-
-    def job(self, job_id):
-        fields = {}
-        for line in self.ctl("get", str(job_id)).stdout.splitlines():
-            key, _, value = line.partition("=")
-            fields[key] = value
-        return fields
-
-    def wait_states(self, ids, states):
-        self.wait_for(lambda: all(self.job(i)["state"] in states for i in ids),
-                      f"jobs {ids} to reach {states}")
-
-    def psql(self, sql, dsn=None):
-        r = subprocess.run(["psql", dsn or self.dsn, "-X", "-q", "-tA", "-F", "|", "-c", sql],
-                           capture_output=True, text=True, timeout=TIMEOUT_S)
-        if r.returncode != 0:
-            raise AssertionError(f"psql failed: {r.stderr}")
-        return [line for line in r.stdout.splitlines() if line]
-
-    def violations(self):
-        r = subprocess.run(["psql", self.dsn, "-X", "-q", "-tA", "-F", "|", "-f", CHECKER],
-                           capture_output=True, text=True, timeout=TIMEOUT_S)
-        if r.returncode != 0:
-            raise AssertionError(f"invariant checker failed: {r.stderr}")
-        return [line for line in r.stdout.splitlines() if line]
-
-    def ledger_entries(self, operation_id):
-        return self.psql(
-            f"SELECT entry_id, generation FROM ledger_entries WHERE operation_id = '{operation_id}'")
-
-    def trace(self, job_id):
-        return self.psql(f"SELECT generation, worker_id, outcome FROM job_attempts "
-                         f"WHERE job_id = {job_id} ORDER BY generation")
-
-    def provider_charges(self, reference):
-        if not os.path.exists(self.provider_log):
-            return []
-        with open(self.provider_log) as f:
-            return [l.rstrip("\n").split("\t") for l in f if l.startswith(reference + "\t")]
-
-    @staticmethod
-    def wait_for(predicate, what, timeout=TIMEOUT_S):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if predicate():
-                return
-            time.sleep(0.05)
-        raise AssertionError(f"timed out waiting for {what}")
 
 
 def with_cluster(test):
@@ -177,7 +32,7 @@ def with_cluster(test):
 
     @functools.wraps(test)
     def run(self):
-        cluster = Cluster()
+        cluster = Cluster(BIN, DSN, prefix="faults", lease_ms=LEASE_MS)
         try:
             test(self, cluster)
             self.assertEqual(cluster.violations(), [], "invariant violations")
