@@ -89,6 +89,13 @@ HandlerResult External(WorkSource& source, const TaskOptions& options, const Ass
   if (b.state == ExternalState::kConfirmed) {
     return JobSucceeded{std::format("charge={};reused=true", b.result)};
   }
+  if (b.state == ExternalState::kFailed) {
+    // An operator proved this operation never happened (ADR 0006); reusing its
+    // id replays that decision. Charging again needs a new operation id.
+    return JobFailed{std::format("operation {} was reconciled as not performed: {}",
+                                 c.operation_id, b.result),
+                     false};
+  }
   if (b.state == ExternalState::kInDoubt) {
     return JobUnknown{std::format(
         "operation {} was started by an earlier attempt and never confirmed; it may have "

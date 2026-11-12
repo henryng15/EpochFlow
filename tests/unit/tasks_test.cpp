@@ -250,6 +250,23 @@ TEST_F(TasksTest, ExternalIntentLeftByCrashedAttemptIsNeverRetried) {
   EXPECT_TRUE(provider_.charges.empty());
 }
 
+TEST_F(TasksTest, OperationReconciledAsNotPerformedFailsWithoutCallingTheProvider) {
+  const JobId first = store_.Submit({kExternalJob, 3});
+  provider_.time_out = true;
+  ASSERT_TRUE(std::holds_alternative<JobUnknown>(RunNext()));
+  ASSERT_EQ(store_.MarkUnknown(first, last_.generation, "timeout"), CommitStatus::kAccepted);
+  ASSERT_EQ(store_.ReconcileExternal(first, "charge-1", JobState::kFailed, "no such charge"),
+            CommitStatus::kAccepted);
+
+  // A new job reusing the operation id gets the operator's answer back.
+  provider_.time_out = false;
+  store_.Submit({kExternalJob, 3});
+  const auto failed = As<JobFailed>(RunNext());
+  EXPECT_FALSE(failed.retryable);
+  EXPECT_NE(failed.reason.find("no such charge"), std::string::npos);
+  EXPECT_EQ(provider_.charges.size(), 1u);  // only the original, timed-out call
+}
+
 TEST_F(TasksTest, ExternalWithoutProviderFailsPermanently) {
   store_.Submit({"task=external;op=charge-1;account=alice;amount_cents=500", 3});
   const auto a = store_.Acquire("w", kLease);
