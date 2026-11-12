@@ -7,8 +7,8 @@ turns the existing one-seed chaos demonstration into repeatable performance
 evidence. It does **not** add Kubernetes, consensus, autoscaling, a workflow
 DSL, or a new AI scheduler.
 
-This page is a plan, not a statement that the work has been implemented. Version
-1 remains the current released behavior. See [Architecture](architecture.md)
+**Status:** P0 is implemented (invariant I8; see
+[Invariants](invariants.md)). P1 is in progress; P2 is deferred. See [Architecture](architecture.md)
 and [ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
 for the current external-effect design.
 

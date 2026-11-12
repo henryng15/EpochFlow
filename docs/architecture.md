@@ -102,6 +102,7 @@ See [invariants.md](invariants.md).
 | `operation_id` reused with different content | Job fails without retry (conflict) |
 | External provider times out | Job `UNKNOWN`; not retried until an operator reconciles |
 | Worker crashes during an external call | Next attempt finds the unconfirmed intent and reports `UNKNOWN` instead of charging again |
+| Provider charged, but the confirmation is rejected or never recorded | Job `UNKNOWN`, not `COMPLETED` (I8); the provider is not called again |
 | Coordinator crash and restart (PostgreSQL) | All committed state survives; leases keep their deadlines; expired ones are reclaimed after restart |
 | Coordinator restart (in-memory mode) | All state lost |
 | PostgreSQL unavailable | RPCs fail with `UNAVAILABLE`; no state changes; work resumes when it returns |

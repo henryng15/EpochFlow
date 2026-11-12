@@ -70,6 +70,12 @@ the worker must not call the provider and reports `UNKNOWN` instead;
   `ApplyLedgerOperation` (deduplicated by `operation_id`), and external calls
   are bracketed by `BeginExternalOperation`/`ConfirmExternalOperation` so an
   attempt never repeats a call whose outcome is unknown.
+- **Success needs a recorded confirmation** (invariant I8). After the
+  provider answers, the worker retries `ConfirmExternalOperation` up to three
+  times on transport errors (an identical duplicate returns `OK`, so a lost
+  acknowledgement is harmless). If every try fails, or the coordinator answers
+  `ALREADY_EXISTS` or `NOT_FOUND`, the worker reports `MarkJobUnknown` instead
+  of `CompleteJob`, and never calls the provider again.
 - **Uncertainty is reported, not guessed.** A provider timeout or an
   unconfirmed earlier intent becomes `MarkJobUnknown`; the job waits for
   `ReconcileJob`.

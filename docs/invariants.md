@@ -21,6 +21,7 @@ See [architecture.md](architecture.md) for job, lease, generation, and reclaim.
 | I5 | An unconfirmed external effect is recorded as `UNKNOWN`, never silently retried or marked failed. | Both stores and workers (M4) |
 | I6 | Committed job state survives a coordinator restart. | PostgreSQL store (M3) |
 | I7 | Once a job is terminal, its outcome (`result` or `error`) never changes. | Both stores (M1, M3) |
+| I8 | A worker reports a provider effect as completed only after the durable operation record confirms that operation, request, and provider answer. | Workers (Phase 2, P0) |
 
 External effects are at most once, not exactly once: a provider without
 idempotency keys cannot be deduplicated, so EpochFlow guarantees only that it
@@ -30,7 +31,8 @@ never repeats a call whose outcome it does not know (see
 **Checking from data.** `scripts/check-invariants.sql` verifies I2-I4 from the
 tables at rest (attempt numbering, one open attempt, one deciding attempt from
 the current generation, state matching the deciding attempt, one ledger entry
-per operation, effects applied by real assignments) plus stalled recovery.
+per operation, effects applied by real assignments), I8 (no worker-completed
+job owns an external operation that is still `STARTED`), plus stalled recovery.
 Every PostgreSQL contract test and every fault-injection scenario ends by
 running it.
 
@@ -50,6 +52,7 @@ late, but cannot let two assignments both commit.
 | I5 | `ExternalState::kInDoubt` and provider timeouts become `JobUnknown` in the external task (`src/worker/tasks.cpp`); `MarkUnknown` parks the job outside reclaim and acquire; only `Reconcile` leaves `UNKNOWN` | `MarkUnknownParksJobOutsideRetryAndRecovery`, `UnconfirmedIntentFromEarlierAttemptIsInDoubt`, `test_external_timeout_is_unknown_until_reconciled`, `test_crash_during_external_call_is_never_charged_twice` |
 | I6 | Every acknowledged change is committed before the RPC returns; the coordinator keeps no state of its own | `StateSurvivesStoreRestart`, `e2e.restart` |
 | I7 | Duplicate check for the finishing generation returns `kAccepted`/`kConflict` without writing; this is what makes `Worker` report retries safe | `DuplicateCompleteWithDifferentResultConflicts`, `DuplicateFinalFailureIsIdempotent`, `CompleteAfterFinalFailureIsStale`, `RetriesReportWhenAcknowledgementIsLost` |
+| I8 | After the provider call, the external task (`src/worker/tasks.cpp`) succeeds only if `ConfirmExternal` returns `kAccepted` (an identical duplicate counts, so a lost acknowledgement is safe); a rejection, or three transport failures, returns `JobUnknown` without calling the provider again | `RejectedConfirmationMakesTheOutcomeUnknownWithoutCallingTheProviderAgain`, `ConfirmationThatNeverReachesTheStoreMakesTheOutcomeUnknown`, `LostConfirmationAcknowledgementIsRecognizedOnRetry`, `UnrecordedConfirmationLeavesTheJobUnknownNotCompleted`, `test_lost_confirmation_is_unknown_not_completed`, checker `I8 completed job has unresolved external operation` |
 
 ## Related documents
 

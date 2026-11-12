@@ -103,6 +103,7 @@ SIGCONT by the harness, and from SIGKILL of the coordinator.
 | Coordinator SIGKILL mid-run (60 jobs, 3 workers) | All complete; 60 distinct entries with the right total |
 | Provider times out after charging | `UNKNOWN`, not retried; reconciled by `epochflowctl` |
 | Crash after the provider charged, before confirming | Next attempt `UNKNOWN`; provider charged once |
+| Provider charged, but no confirmation reaches the coordinator | `UNKNOWN`, not `COMPLETED` (I8); provider charged once |
 
 Every scenario, and every PostgreSQL contract test (through
 `StoreHarness::VerifyInvariants`), ends by running
