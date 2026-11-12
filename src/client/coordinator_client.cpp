@@ -146,11 +146,13 @@ CommitStatus CoordinatorClient::ConfirmExternal(const std::string& operation_id,
   return rpc::ToCommitStatus(stub_->ConfirmExternalOperation(&ctx, req, &resp));
 }
 
-CommitStatus CoordinatorClient::Reconcile(JobId id, JobState outcome, const std::string& detail) {
+CommitStatus CoordinatorClient::Reconcile(JobId id, JobState outcome, const std::string& detail,
+                                          const std::string& operation_id) {
   v1::ReconcileJobRequest req;
   req.set_job_id(id);
   req.set_outcome(rpc::ToProto(outcome));
   req.set_detail(detail);
+  req.set_operation_id(operation_id);
   v1::ReconcileJobResponse resp;
   grpc::ClientContext ctx;
   Prepare(ctx);

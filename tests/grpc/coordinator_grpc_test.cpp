@@ -233,5 +233,35 @@ TEST_F(CoordinatorGrpcTest, UnknownAndReconcileSurviveTheWire) {
   EXPECT_EQ(job->result, "ch_9");
 }
 
+TEST_F(CoordinatorGrpcTest, OperationReconciliationSurvivesTheWire) {
+  const JobId paid = client_->Submit({"charge", 3});
+  const JobId unpaid = client_->Submit({"charge", 3});
+  for (const auto& [id, op] : {std::pair{paid, "charge-1"}, std::pair{unpaid, "charge-2"}}) {
+    const auto a = client_->Acquire("w1");
+    ASSERT_EQ(a->job_id, id);
+    client_->BeginExternal(id, a->generation, op, "req");
+    client_->MarkUnknown(id, a->generation, "timeout");
+  }
+
+  EXPECT_EQ(client_->Reconcile(paid, JobState::kCompleted, "ch_9", "charge-2"),
+            CommitStatus::kConflict);  // ALREADY_EXISTS: not this job's operation
+  EXPECT_EQ(client_->Reconcile(paid, JobState::kCompleted, "ch_9", "missing"),
+            CommitStatus::kNotFound);
+  EXPECT_EQ(client_->Reconcile(paid, JobState::kCompleted, "ch_9", "charge-1"),
+            CommitStatus::kAccepted);
+  EXPECT_EQ(client_->Reconcile(paid, JobState::kCompleted, "ch_8", "charge-1"),
+            CommitStatus::kStale);  // FAILED_PRECONDITION: already resolved otherwise
+  EXPECT_EQ(client_->Get(paid)->result, "ch_9");
+
+  ASSERT_EQ(client_->Reconcile(unpaid, JobState::kFailed, "no charge", "charge-2"),
+            CommitStatus::kAccepted);
+  const JobId retry = client_->Submit({"charge", 3});
+  const auto r = client_->Acquire("w2");
+  ASSERT_EQ(r->job_id, retry);
+  const auto begin = client_->BeginExternal(retry, r->generation, "charge-2", "req");
+  EXPECT_EQ(begin.state, ExternalState::kFailed);
+  EXPECT_EQ(begin.result, "no charge");
+}
+
 }  // namespace
 }  // namespace epochflow::testing

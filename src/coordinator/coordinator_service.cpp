@@ -169,14 +169,27 @@ grpc::Status CoordinatorService::ReconcileJob(grpc::ServerContext*,
     // FromProto throws std::invalid_argument for unspecified states and the
     // store for non-terminal ones; both become INVALID_ARGUMENT.
     const JobState outcome = rpc::FromProto(req->outcome());
-    const CommitStatus s = store_.Reconcile(req->job_id(), outcome, req->detail());
+    const std::string& op = req->operation_id();
+    const CommitStatus s =
+        op.empty() ? store_.Reconcile(req->job_id(), outcome, req->detail())
+                   : store_.ReconcileExternal(req->job_id(), op, outcome, req->detail());
     if (log_ && s == CommitStatus::kAccepted) {
-      log_(std::format("reconciled job={} outcome={}", req->job_id(), ToString(outcome)));
+      log_(std::format("reconciled job={} outcome={}{}", req->job_id(), ToString(outcome),
+                       op.empty() ? "" : " operation=" + op));
     }
-    if (s == CommitStatus::kStale) {
-      return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "job is not UNKNOWN"};
+    switch (s) {
+      case CommitStatus::kStale:
+        return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "job is not UNKNOWN"};
+      case CommitStatus::kNotFound:
+        return grpc::Status{grpc::StatusCode::NOT_FOUND,
+                            op.empty() ? "job not found" : "job or operation not found"};
+      case CommitStatus::kConflict:
+        return grpc::Status{grpc::StatusCode::ALREADY_EXISTS,
+                            "operation is not this job's external operation, or the decision "
+                            "contradicts its recorded confirmation"};
+      default:
+        return rpc::ToStatus(s);
     }
-    return rpc::ToStatus(s);
   });
 }
 

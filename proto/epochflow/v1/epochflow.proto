@@ -69,7 +69,11 @@ service Coordinator {
 
   // Operator decision: UNKNOWN -> COMPLETED or FAILED with evidence in
   // `detail`. FAILED_PRECONDITION if the job is not UNKNOWN (repeating the same
-  // decision returns OK).
+  // decision returns OK). With `operation_id`, the job's external operation is
+  // resolved in the same transaction (ADR 0006): CONFIRMED or FAILED with the
+  // evidence; NOT_FOUND if the operation does not exist; ALREADY_EXISTS if it
+  // is not an external operation created by this job, or the decision
+  // contradicts a recorded confirmation.
   rpc ReconcileJob(ReconcileJobRequest) returns (ReconcileJobResponse);
 }
 
@@ -87,6 +91,9 @@ enum ExternalState {
   EXTERNAL_STATE_START = 1;
   EXTERNAL_STATE_IN_DOUBT = 2;
   EXTERNAL_STATE_CONFIRMED = 3;
+  // An operator reconciled the operation as never performed; do not call the
+  // provider, fail the job without retry. The evidence is in `confirmation`.
+  EXTERNAL_STATE_FAILED = 4;
 }
 
 message Job {
@@ -198,7 +205,8 @@ message BeginExternalOperationRequest {
 
 message BeginExternalOperationResponse {
   ExternalState state = 1;
-  // Present when state is CONFIRMED.
+  // The provider's answer when state is CONFIRMED; the operator's evidence
+  // when state is FAILED.
   string confirmation = 2;
 }
 
@@ -224,6 +232,9 @@ message ReconcileJobRequest {
   JobState outcome = 2;
   // Result (COMPLETED) or error (FAILED), typically the evidence used.
   string detail = 3;
+  // Optional: the external operation this job created. When set, the
+  // operation is resolved together with the job; `detail` becomes its result.
+  string operation_id = 4;
 }
 
 message ReconcileJobResponse {}

@@ -29,10 +29,13 @@ commands:
   wait JOB_ID... [--timeout-ms=N] [--allow-unknown]
       Poll until every job is COMPLETED or FAILED (default timeout 30000).
       With --allow-unknown, UNKNOWN also ends the wait and counts as success.
-  reconcile JOB_ID --outcome=completed|failed --detail=TEXT
+  reconcile JOB_ID --outcome=completed|failed --detail=TEXT [--operation=ID]
       Resolve an UNKNOWN job after checking the external system; TEXT becomes
-      the result (completed) or error (failed). Repeating the same decision
-      succeeds; a job that is not UNKNOWN is an error.
+      the result (completed) or error (failed). With --operation, the job's
+      external operation is resolved in the same step: confirmed with TEXT as
+      the provider's answer, or failed for good (later jobs reusing the id
+      fail too). Repeating the same decision succeeds; a job that is not
+      UNKNOWN, or a decision contradicting the record, is an error.
 
 exit status: 0 success (wait: all COMPLETED), 1 failure (job FAILED, unknown
 job, timeout, RPC error), 2 usage error. Default coordinator 127.0.0.1:50051.
@@ -116,13 +119,27 @@ int Reconcile(CoordinatorClient& client, const std::vector<std::string>& args,
   }
   if (!flags.Has("detail")) throw std::invalid_argument("reconcile requires --detail");
   const JobId id = ParseJobId(args[1]);
+  const std::string op = flags.GetString("operation", "");
+  if (flags.Has("operation") && op.empty()) throw std::invalid_argument("--operation is empty");
   const auto status = client.Reconcile(
       id, outcome == "completed" ? epochflow::JobState::kCompleted : epochflow::JobState::kFailed,
-      flags.GetString("detail", ""));
-  if (status == epochflow::CommitStatus::kAccepted) return 0;
-  std::cerr << "job " << id
-            << (status == epochflow::CommitStatus::kNotFound ? " not found\n" : " is not UNKNOWN\n");
-  return 1;
+      flags.GetString("detail", ""), op);
+  using epochflow::CommitStatus;
+  switch (status) {
+    case CommitStatus::kAccepted:
+      return 0;
+    case CommitStatus::kNotFound:
+      std::cerr << "job " << id << (op.empty() ? "" : " or operation " + op) << " not found\n";
+      return 1;
+    case CommitStatus::kConflict:
+      std::cerr << "operation " << op << " is not job " << id
+                << "'s external operation, or the decision contradicts its recorded "
+                   "confirmation\n";
+      return 1;
+    default:
+      std::cerr << "job " << id << " is not UNKNOWN\n";
+      return 1;
+  }
 }
 
 }  // namespace
@@ -132,7 +149,7 @@ int main(int argc, char** argv) {
     const epochflow::Flags flags(
         argc, argv,
         {"coordinator", "payload", "max-attempts", "count", "timeout-ms", "allow-unknown", "outcome",
-         "detail", "help"});
+         "detail", "operation", "help"});
     const auto& args = flags.positional();
     if (flags.Has("help")) {
       std::cout << kUsage;

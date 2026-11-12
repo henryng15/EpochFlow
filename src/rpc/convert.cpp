@@ -48,6 +48,8 @@ v1::ExternalState ToProto(ExternalState state) {
       return v1::EXTERNAL_STATE_IN_DOUBT;
     case ExternalState::kConfirmed:
       return v1::EXTERNAL_STATE_CONFIRMED;
+    case ExternalState::kFailed:
+      return v1::EXTERNAL_STATE_FAILED;
   }
   return v1::EXTERNAL_STATE_UNSPECIFIED;
 }
@@ -60,6 +62,8 @@ ExternalState FromProto(v1::ExternalState state) {
       return ExternalState::kInDoubt;
     case v1::EXTERNAL_STATE_CONFIRMED:
       return ExternalState::kConfirmed;
+    case v1::EXTERNAL_STATE_FAILED:
+      return ExternalState::kFailed;
     default:
       throw std::invalid_argument("unsupported external state on the wire");
   }

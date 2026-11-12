@@ -52,7 +52,10 @@ class CoordinatorClient final : public WorkSource {
                                const std::string& confirmation) override;
 
   // Operator action (epochflowctl reconcile). kStale if the job is not UNKNOWN.
-  CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail);
+  // With `operation_id`, resolves that external operation of the job in the
+  // same transaction (JobStore::ReconcileExternal for the statuses).
+  CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail,
+                         const std::string& operation_id = {});
 
  private:
   void Prepare(grpc::ClientContext& context) const;
