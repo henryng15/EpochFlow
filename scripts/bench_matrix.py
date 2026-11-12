@@ -2,16 +2,21 @@
 """Seeded benchmark matrix: scripts/bench.py over many seeds, worker counts,
 and job counts, with raw per-run output and an aggregate report.
 
-Every matrix cell (workers x jobs) runs each seed in both modes back to back,
-so each EpochFlow/naive pair replays the same job set and chaos schedule.
+Every cell (workers x jobs) runs each seed in both modes back to back, so each
+EpochFlow/naive pair replays the same job set and chaos schedule. The design
+has a main grid (--seeds x --workers x --jobs, minus --exclude cells), which
+gets statistical summaries, and optional stress cells (--stress), each with
+its own seeds, reported run by run and never mixed into the main statistics.
 
-  run        execute the runs not yet recorded in OUT/raw.jsonl (resumable;
-             failed runs are retried), recording OUT/environment.json
+  run        execute the planned runs not yet recorded in OUT/raw.jsonl
+             (resumable; failed runs are retried), recording the design and
+             every revision of it in OUT/environment.json
   aggregate  write OUT/summary.md from OUT/raw.jsonl
 
-Example (the Phase 2 matrix, about four hours on WSL2):
+Example (the Phase 2 design, about 1.5 hours on WSL2):
   scripts/bench_matrix.py run --bin build/bin --dsn "$(scripts/test-db.sh dsn)" \\
-      --out docs/benchmarks/phase-2 --seeds 1-20 --workers 1,3,6 --jobs 200,1000
+      --out docs/benchmarks/phase-2 --seeds 1-20 --workers 1,3,6 --jobs 200,1000 \\
+      --exclude 1:1000 --stress 1:1000:1-3
   scripts/bench_matrix.py aggregate --out docs/benchmarks/phase-2
 
 Standard library only; see docs/testing.md.
@@ -43,7 +48,7 @@ METRICS = [
     ("duplicate_ledger_entries", "Duplicate ledger entries"),
     ("overcharged_cents", "Overcharged (cents)"),
     ("invariant_violations", "Invariant violations"),
-    ("incomplete_jobs", "Incomplete jobs"),
+    ("incomplete_jobs", "Jobs not completed (FAILED after max attempts)"),
 ]
 
 # Settings shared by every run, recorded with the results.
@@ -54,8 +59,91 @@ MIN_AVAILABLE_KIB = 1024 * 1024  # do not start a run with less than 1 GiB free
 
 
 def plan(seeds, workers, jobs):
-    """Every (seed, workers, jobs, mode), one seed at a time, pairs adjacent."""
-    return [(s, w, j, m) for s in seeds for w in workers for j in jobs for m in MODES]
+    """Every (seed, workers, jobs, mode) of a full grid, one seed at a time,
+    pairs adjacent."""
+    return plan_design(design(seeds, workers, jobs))
+
+
+def design(seeds, workers, jobs, exclude=(), stress=()):
+    """The experiment: a main grid without the excluded cells, plus stress
+    cells with their own seeds. Excluded cells are listed, never dropped
+    silently."""
+    excluded = {tuple(c) for c in exclude}
+    return {
+        "main": {"seeds": list(seeds),
+                 "cells": [[w, j] for w in workers for j in jobs if (w, j) not in excluded],
+                 "excluded": [list(c) for c in exclude]},
+        "stress": [{"workers": w, "jobs": j, "seeds": list(ss)} for w, j, ss in stress],
+    }
+
+
+def plan_design(d):
+    """Main runs seed by seed (pairs adjacent), then each stress cell."""
+    runs = [(s, w, j, m) for s in d["main"]["seeds"] for w, j in d["main"]["cells"]
+            for m in MODES]
+    for c in d["stress"]:
+        runs += [(s, c["workers"], c["jobs"], m) for s in c["seeds"] for m in MODES]
+    return runs
+
+
+def group_of(d, seed, workers, jobs):
+    """"main", "stress", or None for a run outside the design."""
+    if [workers, jobs] in d["main"]["cells"] and seed in d["main"]["seeds"]:
+        return "main"
+    for c in d["stress"]:
+        if (c["workers"], c["jobs"]) == (workers, jobs) and seed in c["seeds"]:
+            return "stress"
+    return None
+
+
+def select(rows, d, group):
+    return [r for r in rows if group_of(d, r["seed"], r["workers"], r["jobs"]) == group]
+
+
+def coverage(d, rows):
+    """Per planned cell: planned and complete pairs (both modes succeeded) and
+    failed runs; plus recorded runs outside the design, per cell."""
+    ok = {run_key(r) for r in rows if "error" not in r}
+    bad = {run_key(r) for r in rows if "error" in r} - ok
+    cells = [("main", w, j, d["main"]["seeds"]) for w, j in d["main"]["cells"]]
+    cells += [("stress", c["workers"], c["jobs"], c["seeds"]) for c in d["stress"]]
+    out = []
+    for group, w, j, seeds in cells:
+        out.append({
+            "group": group, "workers": w, "jobs": j, "seeds": seeds,
+            "planned_pairs": len(seeds),
+            "complete_pairs": sum(1 for s in seeds if all((s, w, j, m) in ok for m in MODES)),
+            "failed_runs": sum(1 for s in seeds for m in MODES if (s, w, j, m) in bad),
+        })
+    outside = {}
+    for r in rows:
+        if "error" not in r and group_of(d, r["seed"], r["workers"], r["jobs"]) is None:
+            outside.setdefault((r["workers"], r["jobs"]), []).append(r["seed"])
+    for (w, j), seeds in sorted(outside.items()):
+        out.append({"group": "outside design", "workers": w, "jobs": j,
+                    "seeds": sorted(set(seeds)), "runs": len(seeds)})
+    return out
+
+
+def paired(rows):
+    """Per cell, over seeds where both modes succeeded: EpochFlow/naive
+    throughput ratio and duplicate totals."""
+    ok = {run_key(r): r for r in rows if "error" not in r}
+    out = {}
+    for (seed, w, j, mode), e in sorted(ok.items()):
+        n = ok.get((seed, w, j, "naive"))
+        if mode != "epochflow" or n is None:
+            continue
+        cell = out.setdefault((w, j), {"ratios": [], "naive_duplicates_total": 0,
+                                       "epochflow_duplicates_total": 0})
+        if e["throughput_jobs_per_s"] and n["throughput_jobs_per_s"]:
+            cell["ratios"].append(e["throughput_jobs_per_s"] / n["throughput_jobs_per_s"])
+        cell["naive_duplicates_total"] += n["duplicate_ledger_entries"]
+        cell["epochflow_duplicates_total"] += e["duplicate_ledger_entries"]
+    for cell in out.values():
+        cell["pairs"] = len(cell["ratios"])
+        cell["throughput_ratio"] = stats(cell.pop("ratios"))
+    return out
 
 
 def run_key(row):
@@ -118,9 +206,9 @@ def summarize(rows):
 def fmt(value):
     if value is None:
         return "n/a"
-    if isinstance(value, float) and not value.is_integer():
+    if isinstance(value, float):
         return f"{value:.2f}"
-    return str(int(value))
+    return str(value)
 
 
 def load_rows(path):
@@ -130,12 +218,45 @@ def load_rows(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
+LIMITATIONS = """\
+- One machine (WSL2), with PostgreSQL in Docker on the same host and every
+  process sharing its CPUs. Numbers describe this environment only; they are
+  not production, cloud-network, or provider performance.
+- The chaos schedule is replayed until every job finishes, so slower runs
+  receive more events; event counts differ between runs and cells.
+- Recovery latency is measured from a chaos event (host clock) to the next
+  attempt of each job the affected worker held (database clock, same host).
+  It includes the 1 s lease and the reclaim interval by design.
+- Jobs keep the default retry budget (max_attempts = 3): a job interrupted on
+  all three attempts ends FAILED, in either mode, and counts as not
+  completed. The benchmark does not record whether such a job's ledger effect
+  had been applied before its last attempt was lost.
+- The naive baseline differs only in sending a fresh operation id per attempt;
+  fencing stays on, so it shows duplicate effects, not stale overwrites.
+- Medians and percentiles summarize 20 seeds per main cell; with that sample,
+  p95 is close to the maximum. No significance test is claimed.
+- The single-worker stress cell has 3 seeds and is reported run by run; it is
+  not part of any statistical summary. With one worker, every kill or pause
+  stops all progress until recovery, so its throughput is dominated by
+  chaos, not by EpochFlow overhead.
+"""
+
+
+def design_from_env(env):
+    if "design" in env:
+        return env["design"]
+    return design(env.get("seeds", []), env.get("workers", []), env.get("jobs", []))
+
+
 def render(out):
     rows = load_rows(os.path.join(out, "raw.jsonl"))
     with open(os.path.join(out, "environment.json")) as f:
         env = json.load(f)
-    summary = summarize(rows)
+    d = design_from_env(env)
+    main_rows = select(rows, d, "main")
+    summary = summarize(main_rows)
     keys = sorted(summary, key=lambda k: (k[0], k[1], MODES.index(k[2])))
+    pairs = paired(main_rows)
 
     lines = ["# Benchmark matrix", "",
              "Generated by `scripts/bench_matrix.py aggregate` from `raw.jsonl` (one JSON "
@@ -148,14 +269,35 @@ def render(out):
              f"- CPU: {env.get('cpu')}",
              f"- Memory: {env.get('memory')}",
              f"- PostgreSQL: {env.get('postgres')}",
-             f"- Seeds: {env.get('seeds')}; workers: {env.get('workers')}; jobs: {env.get('jobs')}",
-             f"- Settings: {', '.join(f'{k}={v}' for k, v in env.get('settings', {}).items())}",
-             "",
-             "## Correctness", "",
-             "| Workers | Jobs | Mode | Runs | Failed runs | Runs with duplicates | "
-             "Duplicate entries (max) | Overcharged cents (max) | Invariant violations (max) | "
-             "Incomplete jobs (max) |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+             f"- Settings: {', '.join(f'{k}={v}' for k, v in env.get('settings', {}).items())}"]
+    notes = env.get("notes", [])
+    if notes:
+        lines += ["- Notes:"] + [f"  - {n}" for n in notes]
+    revisions = env.get("revisions", [])
+    if revisions:
+        lines += ["- Design revisions (completed runs are kept; nothing was rerun):"]
+        lines += [f"  - {r.get('at')}: `{r.get('command')}`" for r in revisions]
+
+    lines += ["", "## Coverage", "",
+              "| Group | Workers | Jobs | Seeds | Planned pairs | Complete pairs | Failed runs |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]
+    for c in coverage(d, rows):
+        if c["group"] == "outside design":
+            lines.append(f"| outside design (not reported) | {c['workers']} | {c['jobs']} | "
+                         f"{seed_text(c['seeds'])} | n/a | {c['runs']} runs | n/a |")
+        else:
+            lines.append(f"| {c['group']} | {c['workers']} | {c['jobs']} | "
+                         f"{seed_text(c['seeds'])} | {c['planned_pairs']} | "
+                         f"{c['complete_pairs']} | {c['failed_runs']} |")
+    if d["main"].get("excluded"):
+        cells = ", ".join(f"workers={w} jobs={j}" for w, j in d["main"]["excluded"])
+        lines += ["", f"Excluded from the main grid: {cells} (see the stress test below)."]
+
+    lines += ["", "## Correctness (main grid)", "",
+              "| Workers | Jobs | Mode | Runs | Failed runs | Runs with duplicates | "
+              "Duplicate entries (max) | Overcharged cents (max) | Invariant violations (max) | "
+              "Jobs not completed (max) |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for k in keys:
         s = summary[k]
         mx = lambda m: fmt(s["metrics"][m]["max"]) if s["metrics"][m] else "n/a"  # noqa: E731
@@ -163,7 +305,20 @@ def render(out):
                      f"{s['runs_with_duplicates']} | {mx('duplicate_ledger_entries')} | "
                      f"{mx('overcharged_cents')} | {mx('invariant_violations')} | "
                      f"{mx('incomplete_jobs')} |")
-    lines += ["", "## Statistics per metric", "",
+
+    lines += ["", "## Paired comparison (main grid)", "",
+              "Per seed, EpochFlow throughput divided by naive throughput on the same chaos "
+              "schedule (1.00 = equal), and total duplicate ledger entries over all pairs.", "",
+              "| Workers | Jobs | Pairs | Throughput ratio median | Min | Max | "
+              "Duplicates, EpochFlow | Duplicates, naive |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for (w, j), c in sorted(pairs.items()):
+        r = c["throughput_ratio"]
+        cols = [fmt(r[x]) for x in ("median", "min", "max")] if r else ["n/a"] * 3
+        lines.append(f"| {w} | {j} | {c['pairs']} | " + " | ".join(cols) +
+                     f" | {c['epochflow_duplicates_total']} | {c['naive_duplicates_total']} |")
+
+    lines += ["", "## Statistics per metric (main grid)", "",
               "Median (= p50), p95 (nearest rank), minimum, and maximum over the runs of each "
               "cell. Recovery latency pools every chaos event of every run: the time from the "
               "event to the next attempt of each job the affected worker held.", ""]
@@ -175,7 +330,41 @@ def render(out):
             cols = [fmt(st[c]) for c in ("median", "p95", "min", "max")] if st else ["n/a"] * 4
             lines.append(f"| {k[0]} | {k[1]} | {k[2]} | " + " | ".join(cols) + " |")
         lines.append("")
+
+    lines += ["## Single-worker stress test", ""]
+    for c in d["stress"]:
+        lines += [f"workers={c['workers']}, jobs={c['jobs']}, seeds {seed_text(c['seeds'])}. "
+                  "Reported run by run; too few seeds for summary statistics.", "",
+                  "| Seed | Mode | Throughput (jobs/s) | Recovery p50 / p95 / max (s) | "
+                  "Chaos events | Retries | Stale rejected | Deduplicated | Duplicate entries | "
+                  "Overcharged cents | Violations | Jobs not completed |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        stress_rows = {run_key(r): r for r in select(rows, d, "stress") if "error" not in r}
+        for seed in c["seeds"]:
+            for mode in MODES:
+                r = stress_rows.get((seed, c["workers"], c["jobs"], mode))
+                if r is None:
+                    lines.append(f"| {seed} | {mode} | not run |" + " |" * 9)
+                    continue
+                g = lambda k: fmt(r.get(k))  # noqa: E731
+                lines.append(
+                    f"| {seed} | {mode} | {g('throughput_jobs_per_s')} | "
+                    f"{g('recovery_p50_s')} / {g('recovery_p95_s')} / {g('recovery_max_s')} | "
+                    f"{g('chaos_events')} | {g('retries')} | {g('stale_requests_rejected')} | "
+                    f"{g('effects_deduplicated')} | {g('duplicate_ledger_entries')} | "
+                    f"{g('overcharged_cents')} | {g('invariant_violations')} | "
+                    f"{fmt(r['jobs'] - r['jobs_completed'])} |")
+        lines.append("")
+
+    lines += ["## Limitations", "", LIMITATIONS]
     return "\n".join(lines)
+
+
+def seed_text(seeds):
+    seeds = sorted(seeds)
+    if seeds and seeds == list(range(seeds[0], seeds[-1] + 1)) and len(seeds) > 2:
+        return f"{seeds[0]}-{seeds[-1]}"
+    return ", ".join(map(str, seeds))
 
 
 def parse_list(text):
@@ -184,6 +373,16 @@ def parse_list(text):
         lo, _, hi = part.partition("-")
         out.extend(range(int(lo), int(hi) + 1) if hi else [int(lo)])
     return out
+
+
+def parse_cell(text):
+    w, j = text.split(":")
+    return (int(w), int(j))
+
+
+def parse_stress(text):
+    w, j, seeds = text.split(":")
+    return (int(w), int(j), parse_list(seeds))
 
 
 def proc_field(path, name):
@@ -217,7 +416,11 @@ def environment(a, settings):
             return "unknown"
     cpu = proc_field("/proc/cpuinfo", "model name") or platform.processor()
     mem_kib = int(proc_field("/proc/meminfo", "MemTotal").split()[0])
-    dirty = " (with uncommitted changes)" if sh("git", "status", "--porcelain") else ""
+    # Uncommitted tracked or new files, ignoring the results directory itself.
+    out_dir = os.path.relpath(os.path.abspath(a.out))
+    changed = [line[3:] for line in sh("git", "status", "--porcelain", "--", ".",
+                                       f":(exclude){out_dir}").splitlines()]
+    dirty = f" (uncommitted: {', '.join(changed)})" if changed else ""
     command = " ".join(["scripts/bench_matrix.py"] +
                        [('--dsn="$(scripts/test-db.sh dsn)"' if x.startswith("--dsn=") else x)
                         for x in _redacted_argv()])
@@ -229,7 +432,6 @@ def environment(a, settings):
         "memory": f"{mem_kib // 1024} MiB",
         "postgres": sh("psql", a.dsn, "-X", "-tAc", "SHOW server_version"),
         "python": platform.python_version(),
-        "seeds": a.seeds, "workers": a.workers, "jobs": a.jobs,
         "settings": settings,
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     }
@@ -255,12 +457,29 @@ def cmd_run(a):
     base = bench.build_parser().parse_args(
         ["--bin", a.bin, "--dsn", a.dsn, "--timeout-s", str(a.timeout_s)])
     settings = {k: getattr(base, k) for k in SETTINGS}
+    d = design(a.seeds, a.workers, a.jobs, a.exclude, a.stress)
     env_path = os.path.join(a.out, "environment.json")
-    if not os.path.exists(env_path):
-        with open(env_path, "w") as f:
-            json.dump(environment(a, settings), f, indent=2)
+    fresh = environment(a, settings)
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            env = json.load(f)
+        if env.get("settings") != settings:
+            raise SystemExit("settings differ from the recorded runs; use another --out")
+    else:
+        env = fresh
+    # Every distinct command that ran against this directory, oldest first.
+    revisions = env.get("revisions") or [
+        {"at": env["started_at"], "command": env["command"], "git": env["git"]}]
+    if revisions[-1]["command"] != fresh["command"]:
+        revisions.append({"at": fresh["started_at"], "command": fresh["command"],
+                          "git": fresh["git"]})
+    env.update(design=d, command=fresh["command"], revisions=revisions)
+    for stale_key in ("seeds", "workers", "jobs"):
+        env.pop(stale_key, None)
+    with open(env_path, "w") as f:
+        json.dump(env, f, indent=2)
 
-    todo = pending(plan(a.seeds, a.workers, a.jobs), load_rows(raw))
+    todo = pending(plan_design(d), load_rows(raw))
     print(f"{len(todo)} runs to go", flush=True)
     for i, (seed, workers, jobs, mode) in enumerate(todo, 1):
         wait_for_memory()
@@ -303,6 +522,11 @@ def main():
     r.add_argument("--workers", type=parse_list, default=parse_list("1,3,6"))
     r.add_argument("--jobs", type=parse_list, default=parse_list("200,1000"))
     r.add_argument("--timeout-s", type=int, default=900)
+    r.add_argument("--exclude", type=parse_cell, action="append", default=[],
+                   metavar="W:J", help="leave a cell out of the main grid (repeatable)")
+    r.add_argument("--stress", type=parse_stress, action="append", default=[],
+                   metavar="W:J:SEEDS",
+                   help="separately reported cell with its own seeds (repeatable)")
     ag = sub.add_parser("aggregate")
     ag.add_argument("--out", required=True)
     a = p.parse_args()

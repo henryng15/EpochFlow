@@ -40,6 +40,51 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(bench_matrix.pending(plan, done), [(1, 3, 200, "naive")])
 
 
+class DesignTest(unittest.TestCase):
+    DESIGN = {"main": {"seeds": [1, 2], "cells": [[1, 200], [3, 200]]},
+              "stress": [{"workers": 1, "jobs": 1000, "seeds": [1]}]}
+
+    def test_excluded_cell_runs_only_as_a_stress_test(self):
+        design = bench_matrix.design(seeds=[1, 2], workers=[1, 3], jobs=[200, 1000],
+                                     exclude=[(1, 1000)], stress=[(1, 1000, [1])])
+        self.assertEqual(design["main"]["cells"], [[1, 200], [3, 200], [3, 1000]])
+        planned = bench_matrix.plan_design(design)
+        self.assertEqual(len(planned), (2 * 3 + 1) * 2)
+        stress = [p for p in planned if (p[1], p[2]) == (1, 1000)]
+        self.assertEqual(stress, [(1, 1, 1000, "epochflow"), (1, 1, 1000, "naive")])
+
+    def test_coverage_reports_every_planned_cell_and_runs_outside_the_design(self):
+        rows = [row(1, m, workers=1) for m in ("epochflow", "naive")]
+        rows += [row(1, "epochflow", workers=3), {**row(1, "naive", workers=3), "error": "x"}]
+        rows += [row(5, m, workers=1, jobs=1000) for m in ("epochflow", "naive")]  # seed 5
+        cov = {(c["group"], c["workers"], c["jobs"]): c
+               for c in bench_matrix.coverage(self.DESIGN, rows)}
+        self.assertEqual(cov[("main", 1, 200)]["complete_pairs"], 1)
+        self.assertEqual(cov[("main", 1, 200)]["planned_pairs"], 2)
+        self.assertEqual(cov[("main", 3, 200)]["complete_pairs"], 0)
+        self.assertEqual(cov[("main", 3, 200)]["failed_runs"], 1)
+        self.assertEqual(cov[("stress", 1, 1000)]["complete_pairs"], 0)
+        self.assertEqual(cov[("outside design", 1, 1000)]["runs"], 2)
+
+    def test_stress_rows_never_enter_the_main_statistics(self):
+        rows = [row(1, "epochflow", workers=1, jobs=1000, throughput_jobs_per_s=1.0),
+                row(1, "epochflow", workers=1, throughput_jobs_per_s=9.0)]
+        main = bench_matrix.summarize(bench_matrix.select(rows, self.DESIGN, "main"))
+        self.assertEqual(list(main), [(1, 200, "epochflow")])
+        stress = bench_matrix.select(rows, self.DESIGN, "stress")
+        self.assertEqual([r["jobs"] for r in stress], [1000])
+
+    def test_paired_comparison_uses_only_complete_pairs(self):
+        rows = [row(1, "epochflow", throughput_jobs_per_s=30.0),
+                row(1, "naive", throughput_jobs_per_s=20.0, duplicate_ledger_entries=3),
+                row(2, "epochflow", throughput_jobs_per_s=10.0)]  # naive missing
+        pairs = bench_matrix.paired(rows)[(3, 200)]
+        self.assertEqual(pairs["pairs"], 1)
+        self.assertEqual(pairs["throughput_ratio"]["median"], 1.5)
+        self.assertEqual(pairs["naive_duplicates_total"], 3)
+        self.assertEqual(pairs["epochflow_duplicates_total"], 0)
+
+
 class SummarizeTest(unittest.TestCase):
     def test_statistics_per_cell_and_mode(self):
         rows = [row(s, "epochflow", throughput_jobs_per_s=t, recovery_samples_s=r)
@@ -71,14 +116,22 @@ class SummarizeTest(unittest.TestCase):
             with open(os.path.join(d, "raw.jsonl"), "w") as f:
                 for r in (row(1, "epochflow"), row(1, "naive", duplicate_ledger_entries=2)):
                     f.write(json.dumps(r) + "\n")
+                f.write(json.dumps(row(2, "epochflow", workers=1, jobs=1000)) + "\n")
             with open(os.path.join(d, "environment.json"), "w") as f:
                 json.dump({"command": "scripts/bench_matrix.py run ...", "postgres": "16.4",
                            "cpu": "test cpu", "os": "Linux", "git": "abc123",
-                           "settings": {"lease_ms": 1000}}, f)
+                           "settings": {"lease_ms": 1000},
+                           "design": {"main": {"seeds": [1], "cells": [[3, 200]]},
+                                      "stress": [{"workers": 1, "jobs": 1000, "seeds": [2]}]},
+                           "revisions": [{"at": "t0", "command": "first ..."}]}, f)
             report = bench_matrix.render(d)
         for text in ("scripts/bench_matrix.py run ...", "16.4", "test cpu", "abc123",
-                     "| 3 | 200 |", "lease_ms"):
+                     "| 3 | 200 | epochflow |", "lease_ms", "first ...", "## Coverage",
+                     "## Single-worker stress test", "## Limitations"):
             self.assertIn(text, report)
+        main, stress = report.split("## Single-worker stress test")
+        self.assertNotIn("| 1 | 1000 |", main.split("## Coverage")[1].split("## Correctness")[1])
+        self.assertIn("| 2 | epochflow |", stress)
 
 
 if __name__ == "__main__":
