@@ -78,6 +78,11 @@ Version 1 is complete: all five roadmap steps are done.
 5. Docker Compose demo and a chaos benchmark with correctness and recovery
    metrics.
 
+Phase 2 is planned, not implemented. It prioritizes durable external-operation
+confirmation, atomic operation-level reconciliation, and multi-seed benchmark
+evidence before optional tracing or an AI example. See the
+[Phase 2 plan](docs/phase-2.md).
+
 ## Results
 
 `scripts/bench.py --mode compare --seed 7`: 200 payments, 3 workers, 1 s lease,
@@ -146,6 +151,7 @@ runbook, and the benchmark.
 - [Storage](docs/storage.md): PostgreSQL schema, transactions, migrations
 - [Operations](docs/operations.md): running the binaries, configuration, logs
 - [Testing](docs/testing.md): test layers, fault-injection scenarios, invariant checks
+- [Phase 2 plan](docs/phase-2.md): proposed correctness fixes and evidence work
 - [Decisions](docs/decisions/): ADRs
 
 Contribution and agent working rules are in [`AGENTS.md`](AGENTS.md).
