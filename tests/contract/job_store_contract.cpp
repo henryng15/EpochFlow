@@ -75,6 +75,7 @@ TEST_P(JobStoreContractTest, AcquireAssignsOldestPendingJobAsGenerationOne) {
   EXPECT_EQ(a->generation, 1);
   EXPECT_EQ(a->attempt, 1);
   EXPECT_EQ(a->payload, "first");
+  EXPECT_EQ(a->lease, kLease);
 
   const auto job = store().Get(first);
   EXPECT_EQ(job->state, JobState::kRunning);

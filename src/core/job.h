@@ -49,6 +49,9 @@ struct Assignment {
   Generation generation = 0;
   std::string payload;
   TimePoint lease_until;
+  // Length of the granted lease. Workers derive their renewal interval from it
+  // rather than from lease_until, so their clocks need not match the store's.
+  Duration lease{};
   // 1-based attempt number of this assignment.
   int attempt = 0;
 };

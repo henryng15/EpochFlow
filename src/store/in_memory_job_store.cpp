@@ -64,7 +64,7 @@ std::optional<Assignment> InMemoryJobStore::Acquire(const WorkerId& worker, Dura
     ++job.attempts;
     job.worker_id = worker;
     job.lease_until = clock_.Now() + lease;
-    return Assignment{id, job.generation, job.payload, *job.lease_until, job.attempts};
+    return Assignment{id, job.generation, job.payload, *job.lease_until, lease, job.attempts};
   }
   return std::nullopt;
 }
