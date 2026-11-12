@@ -51,7 +51,8 @@ class CoordinatorClient final : public WorkSource {
   CommitStatus ConfirmExternal(const std::string& operation_id, const std::string& request,
                                const std::string& confirmation) override;
 
-  // Operator action (epochflowctl reconcile). kStale if the job is not UNKNOWN.
+  // Operator action (epochflowctl reconcile). kStale if the job is not UNKNOWN
+  // or, without `operation_id`, still has an unresolved external operation.
   // With `operation_id`, resolves that external operation of the job in the
   // same transaction (JobStore::ReconcileExternal for the statuses).
   CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail,

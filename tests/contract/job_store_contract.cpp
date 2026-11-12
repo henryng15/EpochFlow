@@ -822,5 +822,14 @@ TEST_P(JobStoreContractTest, ReconcileExternalOnlyResolvesUnknownJobs) {
   EXPECT_EQ(store().Get(id)->state, JobState::kRunning);
 }
 
+TEST_P(JobStoreContractTest, JobOnlyReconcileIsRefusedWhileAnExternalOperationIsUnresolved) {
+  const JobId id = UnknownWithIntent(store());
+  EXPECT_EQ(store().Reconcile(id, JobState::kCompleted, "ch_9"), CommitStatus::kStale);
+  EXPECT_EQ(store().Get(id)->state, JobState::kUnknown);
+  // Once the provider's answer is recorded, nothing is left unresolved.
+  ASSERT_EQ(store().ConfirmExternal(kOp, kReq, "ch_9"), CommitStatus::kAccepted);
+  EXPECT_EQ(store().Reconcile(id, JobState::kCompleted, "ch_9"), CommitStatus::kAccepted);
+}
+
 }  // namespace
 }  // namespace epochflow::testing

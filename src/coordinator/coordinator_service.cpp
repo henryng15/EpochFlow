@@ -179,7 +179,10 @@ grpc::Status CoordinatorService::ReconcileJob(grpc::ServerContext*,
     }
     switch (s) {
       case CommitStatus::kStale:
-        return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "job is not UNKNOWN"};
+        return grpc::Status{grpc::StatusCode::FAILED_PRECONDITION,
+                            op.empty() ? "job is not UNKNOWN, or it has an unresolved external "
+                                         "operation (reconcile it with operation_id)"
+                                       : "job is not UNKNOWN"};
       case CommitStatus::kNotFound:
         return grpc::Status{grpc::StatusCode::NOT_FOUND,
                             op.empty() ? "job not found" : "job or operation not found"};

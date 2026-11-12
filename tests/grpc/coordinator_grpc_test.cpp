@@ -243,6 +243,8 @@ TEST_F(CoordinatorGrpcTest, OperationReconciliationSurvivesTheWire) {
     client_->MarkUnknown(id, a->generation, "timeout");
   }
 
+  EXPECT_EQ(client_->Reconcile(paid, JobState::kCompleted, "ch_9"),
+            CommitStatus::kStale);  // job-only: the intent would stay unresolved
   EXPECT_EQ(client_->Reconcile(paid, JobState::kCompleted, "ch_9", "charge-2"),
             CommitStatus::kConflict);  // ALREADY_EXISTS: not this job's operation
   EXPECT_EQ(client_->Reconcile(paid, JobState::kCompleted, "ch_9", "missing"),

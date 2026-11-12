@@ -137,7 +137,11 @@ int Reconcile(CoordinatorClient& client, const std::vector<std::string>& args,
                    "confirmation\n";
       return 1;
     default:
-      std::cerr << "job " << id << " is not UNKNOWN\n";
+      std::cerr << "job " << id << " is not UNKNOWN"
+                << (op.empty() ? ", or it has an unresolved external operation: pass "
+                                 "--operation=ID (named in the job's error)"
+                               : "")
+                << "\n";
       return 1;
   }
 }

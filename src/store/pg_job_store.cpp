@@ -65,6 +65,12 @@ constexpr std::string_view kFailSql =
 
 // Strictly past deadlines, matching the in-memory store (a lease is still
 // valid at its exact deadline).
+// Job-only reconciliation must not resolve a job whose external intent is
+// still unresolved; that goes through ReconcileExternal (ADR 0006).
+constexpr std::string_view kNoUnresolvedExternal =
+    "NOT EXISTS (SELECT 1 FROM operations WHERE operations.job_id = jobs.job_id "
+    "AND kind = 'EXTERNAL' AND status = 'STARTED')";
+
 constexpr std::string_view kReclaimSql = R"sql(
 WITH reclaimed AS (
 UPDATE jobs
@@ -390,10 +396,12 @@ CommitStatus PgJobStore::Reconcile(JobId id, JobState outcome, const std::string
   pqxx::work tx{*conn};
   const pqxx::result updated =
       completed ? tx.exec("UPDATE jobs SET state = 'COMPLETED', result = $2, updated_at = now() "
-                          "WHERE job_id = $1 AND state = 'UNKNOWN'",
+                          "WHERE job_id = $1 AND state = 'UNKNOWN' AND " +
+                              std::string{kNoUnresolvedExternal},
                           pqxx::params{id, pqxx::binary_cast(detail)})
                 : tx.exec("UPDATE jobs SET state = 'FAILED', error = $2, updated_at = now() "
-                          "WHERE job_id = $1 AND state = 'UNKNOWN'",
+                          "WHERE job_id = $1 AND state = 'UNKNOWN' AND " +
+                              std::string{kNoUnresolvedExternal},
                           pqxx::params{id, detail});
   CommitStatus status = CommitStatus::kAccepted;
   if (updated.affected_rows() == 0) {

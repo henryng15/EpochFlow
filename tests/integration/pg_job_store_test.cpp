@@ -427,5 +427,33 @@ TEST_F(PgJobStoreTest, ReconciliationIsRecordedOnTheOperation) {
   EXPECT_EQ(InvariantViolations(Dsn()), std::vector<std::string>{});
 }
 
+TEST_F(PgJobStoreTest, InvariantCheckerReportsJobOperationDivergence) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  const JobId legacy = UnknownExternalJob(store, "charge-1");
+  const JobId flipped = UnknownExternalJob(store, "charge-2");
+  ASSERT_EQ(store.ReconcileExternal(flipped, "charge-2", JobState::kFailed, "no charge"),
+            CommitStatus::kAccepted);
+  {
+    // Forge what Version 1 job-only reconciliation, or a broken store, could
+    // produce: a completed job whose intent is unresolved, and a job whose
+    // outcome contradicts the operator's decision on its operation.
+    pqxx::connection conn{Dsn()};
+    pqxx::work tx{conn};
+    tx.exec("UPDATE jobs SET state = 'COMPLETED', result = 'x'::bytea WHERE job_id = $1",
+            pqxx::params{legacy});
+    tx.exec("UPDATE operations SET status = 'CONFIRMED', result = 'ch_1' "
+            "WHERE operation_id = 'charge-2'");
+    tx.commit();
+  }
+  const auto id = [](JobId j) { return std::to_string(j); };
+  EXPECT_EQ(InvariantViolations(Dsn()),
+            (std::vector<std::string>{
+                "I8 completed job has unresolved external operation|job " + id(legacy) +
+                    "|operation charge-1 is STARTED",
+                "I8 reconciled operation disagrees with job|operation charge-2|operation is "
+                "CONFIRMED, job " + id(flipped) + " is FAILED"}));
+}
+
 }  // namespace
 }  // namespace epochflow::testing

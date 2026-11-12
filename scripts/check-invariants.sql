@@ -85,17 +85,24 @@ violations AS (
                     WHERE a.job_id = l.job_id AND a.generation = l.generation)
 
   UNION ALL
-  -- I8: a worker reports a provider effect as completed only once its external
-  -- operation is confirmed; an unconfirmed intent means the outcome is unknown.
-  -- (A job an operator reconciled from UNKNOWN is decided by an UNKNOWN
-  -- attempt and is not covered yet.)
+  -- I8: a job reports a provider effect as completed only once its external
+  -- operation is confirmed, whether a worker or an operator decided it; an
+  -- unconfirmed intent means the outcome is unknown, and a FAILED operation
+  -- means it never happened.
   SELECT 'I8 completed job has unresolved external operation', 'job ' || j.job_id,
          format('operation %s is %s', o.operation_id, o.status)
-  FROM jobs j
-  JOIN finishing f ON f.job_id = j.job_id AND f.generation = j.generation
-  JOIN operations o ON o.job_id = j.job_id
-  WHERE j.state = 'COMPLETED' AND f.outcome = 'COMPLETED'
-    AND o.kind = 'EXTERNAL' AND o.status = 'STARTED'
+  FROM jobs j JOIN operations o ON o.job_id = j.job_id
+  WHERE j.state = 'COMPLETED' AND o.kind = 'EXTERNAL' AND o.status IN ('STARTED', 'FAILED')
+
+  UNION ALL
+  -- I8: an operator decision resolved the operation and its job together, so
+  -- they must agree (ADR 0006).
+  SELECT 'I8 reconciled operation disagrees with job', 'operation ' || o.operation_id,
+         format('operation is %s, job %s is %s', o.status, j.job_id, j.state)
+  FROM operations o JOIN jobs j ON j.job_id = o.job_id
+  WHERE o.reconciled_at IS NOT NULL
+    AND ((o.status = 'CONFIRMED' AND j.state <> 'COMPLETED')
+      OR (o.status = 'FAILED' AND j.state <> 'FAILED'))
 
   UNION ALL
   -- Liveness: a lease expired long ago but the job was never reclaimed.

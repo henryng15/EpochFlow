@@ -109,7 +109,9 @@ class JobStore {
 
   // Operator decision with outside evidence: UNKNOWN -> COMPLETED (`detail`
   // becomes the result) or FAILED (`detail` becomes the error). Repeating the
-  // same decision is kAccepted; any other job state is kStale. Throws
+  // same decision is kAccepted; any other job state is kStale, and so is a job
+  // that still owns a STARTED external operation (resolve it with
+  // ReconcileExternal instead, so job and operation cannot diverge). Throws
   // std::invalid_argument unless `outcome` is kCompleted or kFailed.
   virtual CommitStatus Reconcile(JobId id, JobState outcome, const std::string& detail) = 0;
 

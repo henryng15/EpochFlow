@@ -212,6 +212,12 @@ CommitStatus InMemoryJobStore::Reconcile(JobId id, JobState outcome, const std::
   if (it == jobs_.end()) return CommitStatus::kNotFound;
   JobRecord& job = it->second;
   if (job.state == JobState::kUnknown) {
+    // Resolving the job alone would leave its intent STARTED (ADR 0006).
+    for (const auto& [op_id, op] : operations_) {
+      if (op.job_id == id && op.kind == "EXTERNAL" && op.status == "STARTED") {
+        return CommitStatus::kStale;
+      }
+    }
     TransitionTo(job, outcome);
     (outcome == JobState::kCompleted ? job.result : job.error) = detail;
     return CommitStatus::kAccepted;

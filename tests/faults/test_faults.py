@@ -189,6 +189,10 @@ class FaultScenarios(unittest.TestCase):
         # The operator checks the provider's record and resolves the job and
         # its operation together; repeating the decision is harmless.
         confirmation = charges[0][2]
+        job_only = c.ctl("reconcile", str(job), "--outcome=completed",
+                         f"--detail={confirmation}", check=False)
+        self.assertEqual(job_only.returncode, 1)
+        self.assertIn("--operation", job_only.stderr)
         resolve = ["reconcile", str(job), "--operation=charge-1"]
         c.ctl(*resolve, "--outcome=completed", f"--detail={confirmation}")
         c.ctl(*resolve, "--outcome=completed", f"--detail={confirmation}")
