@@ -62,7 +62,9 @@ lease, waits for every job, runs the invariant checker, and prints a summary
 
 `scripts/bench.py` runs payments while killing (SIGKILL, then restart) or
 freezing (SIGSTOP for 1.5 leases, then SIGCONT) a random worker on a schedule
-pre-drawn from `--seed`, and reports throughput, recovery latency (chaos event
+pre-drawn from `--seed` (an event is skipped only if its worker is already
+frozen, so every worker can be down at once briefly, and a one-worker run
+still sees chaos), and reports throughput, recovery latency (chaos event
 to the next attempt of each interrupted job) p50/p95/max, retries, stale
 requests rejected, effects deduplicated, ledger entries, duplicate entries,
 overcharge, and invariant violations.
@@ -85,6 +87,35 @@ scripts/bench.py --bin build/bin --dsn "$(scripts/test-db.sh dsn)" --mode compar
 Each run uses its own schema and removes it afterwards. Recovery latency uses
 the host clock for chaos events and the database clock for attempt starts;
 both must be the same machine's clock (true for local Docker).
+
+### Benchmark matrix
+
+`scripts/bench_matrix.py` repeats `bench.py` over seeds, worker counts, and job
+counts. Each cell runs every seed in both modes back to back, so every pair
+shares a job set and chaos schedule. `run` appends one JSON object per run to
+`OUT/raw.jsonl`, records the machine, PostgreSQL version, git commit, settings,
+and command in `OUT/environment.json`, and can be stopped and rerun: recorded
+runs are skipped and failed runs retried. It waits while less than 1 GiB of
+memory is available. `aggregate` writes `OUT/summary.md` (median, p95, minimum,
+maximum per cell and mode; recovery latency pools every event).
+
+- `--exclude W:J` removes a cell from the main grid; `--stress W:J:SEEDS` runs a
+  cell with its own seeds as a stress test, reported run by run and never mixed
+  into the main statistics. The coverage table lists every planned cell.
+- Rerunning with a different design is allowed: completed runs are kept, and
+  each design is appended to `revisions` in `environment.json`.
+
+The Phase 2 matrix (about 1.5 hours on the reference laptop; one-worker cells
+dominate):
+
+```bash
+scripts/bench_matrix.py run --bin build/bin --dsn "$(scripts/test-db.sh dsn)" \
+    --out docs/benchmarks/phase-2 --seeds 1-20 --workers 1,3,6 --jobs 200,1000 \
+    --exclude 1:1000 --stress 1:1000:1-3
+scripts/bench_matrix.py aggregate --out docs/benchmarks/phase-2
+```
+
+Do not build or run other heavy work meanwhile: it changes the numbers.
 
 ### Configuration
 

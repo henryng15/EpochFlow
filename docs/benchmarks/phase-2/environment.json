@@ -1,0 +1,101 @@
+{
+  "command": "scripts/bench_matrix.py run --bin build/bin --dsn=\"$(scripts/test-db.sh dsn)\" --out docs/benchmarks/phase-2 --seeds 1-20 --workers 1,3,6 --jobs 200,1000 --exclude 1:1000 --stress 1:1000:1-3",
+  "git": "a5618ed (with uncommitted changes)",
+  "os": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "cpu": "Intel(R) Core(TM) Ultra 7 255H, 16 logical CPUs",
+  "memory": "9944 MiB",
+  "postgres": "16.15 (Debian 16.15-1.pgdg13+2)",
+  "python": "3.13.13",
+  "settings": {
+    "lease_ms": 1000,
+    "reclaim_ms": 100,
+    "work_ms": 30,
+    "work_after_effect_ms": 30,
+    "chaos_interval_ms": 500,
+    "kill_ratio": 0.6,
+    "timeout_s": 900
+  },
+  "started_at": "2026-11-12T04:30:54+00:00",
+  "design": {
+    "main": {
+      "seeds": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "cells": [
+        [
+          1,
+          200
+        ],
+        [
+          3,
+          200
+        ],
+        [
+          3,
+          1000
+        ],
+        [
+          6,
+          200
+        ],
+        [
+          6,
+          1000
+        ]
+      ],
+      "excluded": [
+        [
+          1,
+          1000
+        ]
+      ]
+    },
+    "stress": [
+      {
+        "workers": 1,
+        "jobs": 1000,
+        "seeds": [
+          1,
+          2,
+          3
+        ]
+      }
+    ]
+  },
+  "revisions": [
+    {
+      "at": "2026-11-12T04:30:54+00:00",
+      "command": "scripts/bench_matrix.py run --bin build/bin --dsn=\"$(scripts/test-db.sh dsn)\" --out docs/benchmarks/phase-2 --seeds 1-20 --workers 1,3,6 --jobs 200,1000",
+      "git": "a5618ed (with uncommitted changes)"
+    },
+    {
+      "at": "2026-11-12T05:10:51+00:00",
+      "command": "scripts/bench_matrix.py run --bin build/bin --dsn=\"$(scripts/test-db.sh dsn)\" --out docs/benchmarks/phase-2 --seeds 1-20 --workers 1,3,6 --jobs 200,1000 --exclude 1:1000 --stress 1:1000:1-3",
+      "git": "a5618ed (with uncommitted changes)"
+    }
+  ],
+  "notes": [
+    "Every run used the measurement code and binaries of commit a5618ed: scripts/bench.py, scripts/epochflow_cluster.py, and the C++ sources were unchanged throughout.",
+    "\"(with uncommitted changes)\" in revision 1 came only from this results directory being untracked; revision 2 also had uncommitted edits to scripts/bench_matrix.py (planning and reporting only), committed afterwards.",
+    "Revision 1 planned the full 240-run grid. After seeds 1-3 of every cell and seed 4 of workers=1 jobs=200, the design was revised: workers=1 jobs=1000 became a 3-seed stress test (seeds 1-3, already complete) and the other five cells continued to 20 seeds. No completed run was discarded or rerun; the interrupted seed-4 workers=1 jobs=1000 run was never recorded."
+  ]
+}

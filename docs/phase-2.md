@@ -7,12 +7,13 @@ turns the existing one-seed chaos demonstration into repeatable performance
 evidence. It does **not** add Kubernetes, consensus, autoscaling, a workflow
 DSL, or a new AI scheduler.
 
-**Status:** P0 is implemented (invariant I8; see
-[Invariants](invariants.md)). P1 operation-level reconciliation is implemented
-([ADR 0006](decisions/0006-operation-level-reconciliation.md)); the P1
-benchmark matrix is in progress; P2 is deferred. See [Architecture](architecture.md)
-and [ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
-for the current external-effect design.
+**Status:** P0 and P1 are implemented. P0 is invariant I8 (see
+[Invariants](invariants.md)); P1 is operation-level reconciliation
+([ADR 0006](decisions/0006-operation-level-reconciliation.md)) and the
+benchmark matrix ([results](benchmarks/phase-2/summary.md)). P2 is deferred.
+See [Architecture](architecture.md) and
+[ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md) for the
+current external-effect design.
 
 ## Context and terminology
 
@@ -133,6 +134,21 @@ Report hardware/OS, PostgreSQL version, worker/job parameters, lease settings,
 chaos settings, seed range, and the exact command. Do not claim a statistically
 general performance result outside this local environment.
 
+**As run** ([summary](benchmarks/phase-2/summary.md), raw runs in
+`docs/benchmarks/phase-2/raw.jsonl`): the matrix is reduced in one cell.
+
+- Five cells ran 20 seeds each in both modes: 100 pairs, 200 runs.
+- `workers=1, jobs=1000` ran seeds 1-3 only (3 pairs), reported run by run as a
+  single-worker stress test and kept out of every statistical summary.
+- Reason: with one worker every chaos event stops all progress, so one run of
+  that cell took about 4.5 minutes per mode; 20 seeds would have added about
+  3 hours and measured chaos, not EpochFlow overhead.
+- The design was revised after seeds 1-3 had run; no completed run was
+  discarded or rerun, and both designs are recorded in `environment.json`.
+- Result: EpochFlow had 0 duplicate effects, 0 overcharge, and 0 invariant
+  violations in all 206 runs; the naive baseline duplicated effects in 97 of
+  100 main-grid runs. Median paired throughput ratio was 1.00 to 1.09 per cell.
+
 ### P2: deferred polish
 
 An execution decision trace should explain assignment, renewal, reclaim,
@@ -145,14 +161,17 @@ checkpointed jobs and an ambiguous external model call. It must preserve the
 same `UNKNOWN` semantics; it must not claim idempotent inference or billing
 without provider support.
 
+Upgrade trigger: start the decision trace when a fault scenario or benchmark
+anomaly cannot be explained from existing logs and `job_attempts`; start the AI
+example when a concrete demo audience needs an application, not the engine.
+
 ## Invariants and failure semantics
 
-Existing fencing and idempotency invariants remain unchanged. Phase 2 adds this
-proposed invariant:
-
-| ID | Proposed invariant | Enforcement target |
-| --- | --- | --- |
-| P2-I1 | A worker must not report a provider effect as completed unless its durable operation record confirms the same operation ID, request, and provider result. | Task outcome handling, operation transaction, PostgreSQL invariant checker |
+Existing fencing and idempotency invariants remain unchanged. The proposed
+invariant P2-I1 (a worker must not report a provider effect as completed unless
+its durable operation record confirms the same operation ID, request, and
+provider result) is implemented as **I8** in [Invariants](invariants.md),
+widened by P1 to cover operator-reconciled operations.
 
 When confirmation cannot be established, the safe terminal state is `UNKNOWN`.
 It requires reconciliation; it is neither retried automatically nor converted
@@ -160,16 +179,14 @@ to `FAILED` merely because confirmation transport failed.
 
 ## Implementation map
 
-No code changes are made by this plan. Expected implementation locations are:
-
-| Area | Likely files |
+| Area | Files |
 | --- | --- |
-| P0 task outcome policy | `src/worker/tasks.cpp`, `tests/unit/tasks_test.cpp` |
+| P0 task outcome policy | `src/worker/tasks.cpp`, `tests/unit/tasks_test.cpp`, `lose-confirm` fault in `apps/worker_main.cpp` |
 | Operation contract/store | `src/core/job_store.h`, `src/store/in_memory_job_store.*`, `src/store/pg_job_store.*`, `tests/contract/job_store_contract.cpp` |
-| Reconciliation API | `proto/epochflow/v1/epochflow.proto`, coordinator/client/apps, gRPC tests |
-| Schema and checks | a new `sql/migrations/` file, `scripts/check-invariants.sql`, PostgreSQL integration tests |
-| Benchmark results | `scripts/bench.py`, documented result artifact and `README.md` |
-| Decision trace, if approved | new focused trace module and fault tests |
+| Reconciliation API | `proto/epochflow/v1/epochflow.proto`, `src/coordinator/coordinator_service.cpp`, `src/client/`, `apps/epochflowctl.cpp`, `tests/grpc/` |
+| Schema and checks | `sql/migrations/0004_operation_reconciliation.sql`, `scripts/check-invariants.sql`, `tests/integration/pg_job_store_test.cpp` |
+| Benchmark matrix | `scripts/bench.py`, `scripts/bench_matrix.py`, `tests/bench/`, `docs/benchmarks/phase-2/` |
+| Decision trace | not started (P2) |
 
 ## Operating and testing
 

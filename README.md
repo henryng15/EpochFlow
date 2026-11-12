@@ -78,37 +78,47 @@ Version 1 is complete: all five roadmap steps are done.
 5. Docker Compose demo and a chaos benchmark with correctness and recovery
    metrics.
 
-Phase 2 is planned, not implemented. It prioritizes durable external-operation
-confirmation, atomic operation-level reconciliation, and multi-seed benchmark
-evidence before optional tracing or an AI example. See the
-[Phase 2 plan](docs/phase-2.md).
+Phase 2 P0 and P1 are done ([Phase 2](docs/phase-2.md)):
+
+- **P0:** a worker reports an external effect as done only after its
+  confirmation is durably recorded; otherwise the job is `UNKNOWN` (invariant I8).
+- **P1:** `epochflowctl reconcile --operation` resolves the job and its external
+  operation in one transaction ([ADR 0006](docs/decisions/0006-operation-level-reconciliation.md)),
+  and a seeded benchmark matrix replaces the one-seed sample.
+- **P2** (decision trace, AI example) is deferred.
 
 ## Results
 
-`scripts/bench.py --mode compare --seed 7`: 200 payments, 3 workers, 1 s lease,
-workers killed (SIGKILL) or frozen past their lease (SIGSTOP) every ~0.5 s.
-Both runs replay the same chaos schedule; **naive** differs only in sending a
-fresh operation id per attempt, like a client without idempotency keys.
+[Phase 2 benchmark matrix](docs/benchmarks/phase-2/summary.md): payments with a
+1 s lease while a random worker is killed (SIGKILL) or frozen past its lease
+(SIGSTOP) every 0.5 s. Each seed runs both modes on the same jobs and chaos
+schedule; **naive** differs only in sending a fresh operation id per attempt,
+like a client without idempotency keys.
 
-| Metric | EpochFlow | Naive |
-| --- | --- | --- |
-| Jobs completed | 200 / 200 | 200 / 200 |
-| Chaos events (kill / pause) | 11 (7 / 4) | 11 (7 / 4) |
-| Retries | 10 | 10 |
-| Throughput (jobs/s) | 29.0 | 29.2 |
-| Recovery latency p50 / p95 (s) | 1.01 / 1.08 | 1.05 / 1.09 |
-| Stale requests rejected by fencing | 1 | 1 |
-| Effects deduplicated | 7 | 0 |
-| **Duplicate ledger entries** | **0** | **5** |
-| **Overcharged** | **$0.00** | **$5.00** |
-| Invariant violations | 0 | 0 |
+- **Coverage:** 5 cells x 20 seeds x 2 modes = 200 runs, plus a single-worker
+  stress test (1 worker, 1000 jobs, seeds 1-3, 6 runs) reported separately.
+  No run failed.
+- **Correctness:** EpochFlow had **0 duplicate effects, $0 overcharge, and 0
+  invariant violations in all 206 runs**. Naive duplicated effects in 97 of 100
+  main-grid runs (1,010 duplicate ledger entries).
+- **Cost:** the median paired throughput ratio (EpochFlow / naive, same seed)
+  is 1.00 to 1.09 per cell: no consistent throughput cost on this machine.
+- **Recovery:** pooled median 1.0 s with 3 or 6 workers (about one lease);
+  1.8 s with a single worker, which must itself restart or resume.
 
-Recovery takes about one lease, as designed. The protections cost no measurable
-throughput here; every crash between an effect and its report became a
-duplicate charge without idempotency, and a deduplicated no-op with it. Without
-fencing, the rejected stale request would also have overwritten a newer
-result. Numbers vary from run to run; measured on WSL2 (16 vCPU) with
-PostgreSQL 16 in Docker.
+| Workers x jobs (20 seeds) | Runs with duplicates, EpochFlow / naive | Naive overcharge, median (max) | Throughput median, EpochFlow / naive (jobs/s) | Paired throughput ratio, median (range) |
+| --- | --- | --- | --- | --- |
+| 1 x 200 | 0 / 20 | $13.50 ($19.00) | 4.6 / 4.7 | 1.00 (0.70 to 1.41) |
+| 3 x 200 | 0 / 20 | $4.00 ($8.00) | 26.3 / 28.2 | 1.00 (0.60 to 1.30) |
+| 3 x 1000 | 0 / 20 | $21.00 ($29.00) | 30.4 / 29.8 | 1.01 (0.91 to 1.12) |
+| 6 x 200 | 0 / 17 | $2.00 ($4.00) | 60.9 / 61.0 | 1.00 (0.39 to 1.18) |
+| 6 x 1000 | 0 / 20 | $10.50 ($14.00) | 74.9 / 72.8 | 1.09 (0.80 to 1.19) |
+
+In the stress test, naive duplicated 70 to 75 effects per run and EpochFlow
+none, at 3.7 to 4.3 jobs/s in both modes. A few runs in both modes end with one
+job `FAILED` after its three attempts were all interrupted. Measured on one
+WSL2 laptop (16 vCPU) with PostgreSQL 16 in Docker on the same host; these are
+not production numbers. See the summary for p95, spread, and limitations.
 
 ## Quick start
 
@@ -151,7 +161,8 @@ runbook, and the benchmark.
 - [Storage](docs/storage.md): PostgreSQL schema, transactions, migrations
 - [Operations](docs/operations.md): running the binaries, configuration, logs
 - [Testing](docs/testing.md): test layers, fault-injection scenarios, invariant checks
-- [Phase 2 plan](docs/phase-2.md): proposed correctness fixes and evidence work
+- [Phase 2](docs/phase-2.md): confirmation and reconciliation fixes, benchmark matrix
+- [Benchmark results](docs/benchmarks/phase-2/summary.md): Phase 2 matrix, raw runs, environment
 - [Decisions](docs/decisions/): ADRs
 
 Contribution and agent working rules are in [`AGENTS.md`](AGENTS.md).

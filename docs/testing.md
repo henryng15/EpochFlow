@@ -18,6 +18,8 @@ each layer must cover.
 - **Benchmark smoke test** (CTest labels `bench` and `db`): `scripts/bench.py
   --mode compare --jobs 60 --check`; fails unless the EpochFlow run has every
   job completed with no duplicate effect or invariant violation.
+  `bench.matrix_logic` (label `bench` only) unit-tests the matrix plan, resume,
+  and aggregation; `bench.matrix_smoke` runs a one-seed matrix end to end.
 - **Docker demo** (CI job `docker-demo`): builds the image and runs
   `scripts/demo-docker.sh`, which kills and freezes worker containers and runs
   the invariant checker.
@@ -177,6 +179,7 @@ cannot pass silently.
 | `tests/faults/` | Fault-injection scenarios (`faults`) |
 | `scripts/epochflow_cluster.py` | Process control shared by the fault scenarios and the benchmark |
 | `scripts/bench.py`, `scripts/demo-docker.sh` | Benchmark (`bench.smoke`) and Docker demo |
+| `scripts/bench_matrix.py`, `tests/bench/` | Benchmark matrix and its tests (`bench.matrix_*`) |
 | `scripts/check-invariants.sql` | Invariant checker used by tests and operators |
 | `tests/integration/` | Database tests (contract on PostgreSQL, storage), binary `epochflow_integration_tests` |
 | `docker-compose.test.yml`, `scripts/test-db.sh` | Disposable test database (tmpfs data) |
