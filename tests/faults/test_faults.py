@@ -186,14 +186,18 @@ class FaultScenarios(unittest.TestCase):
         self.assertIn("timed out", j["error"])
         self.assertEqual(len(c.provider_charges("charge-1")), 1)
 
-        # The operator checks the provider's record and resolves the job.
+        # The operator checks the provider's record and resolves the job and
+        # its operation together; repeating the decision is harmless.
         confirmation = charges[0][2]
-        c.ctl("reconcile", str(job), "--outcome=completed", f"--detail={confirmation}")
-        c.ctl("reconcile", str(job), "--outcome=completed", f"--detail={confirmation}")
-        self.assertEqual(c.ctl("reconcile", str(job), "--outcome=failed", "--detail=x",
+        resolve = ["reconcile", str(job), "--operation=charge-1"]
+        c.ctl(*resolve, "--outcome=completed", f"--detail={confirmation}")
+        c.ctl(*resolve, "--outcome=completed", f"--detail={confirmation}")
+        self.assertEqual(c.ctl(*resolve, "--outcome=failed", "--detail=x",
                                check=False).returncode, 1)
         j = c.job(job)
         self.assertEqual((j["state"], j["result"]), ("COMPLETED", confirmation))
+        self.assertIn(f"reconciled job={job} outcome=COMPLETED operation=charge-1",
+                      c.log("coordinator"))
 
     @with_cluster
     def test_lost_confirmation_is_unknown_not_completed(self, c):
@@ -206,6 +210,18 @@ class FaultScenarios(unittest.TestCase):
         self.assertIn("not recorded", j["error"])
         self.assertEqual(len(c.provider_charges("charge-3")), 1)  # charged exactly once
         self.assertIn("fault=lose-confirm firing operation=charge-3", c.log("w1"))
+
+        # The operator confirms the charge from the provider's record; a later
+        # job reusing the operation id then completes from that evidence
+        # instead of being in doubt, and the provider is not called again.
+        confirmation = c.provider_charges("charge-3")[0][2]
+        c.ctl("reconcile", str(job), "--operation=charge-3", "--outcome=completed",
+              f"--detail={confirmation}")
+        c.start_worker("w2")
+        [again] = c.submit(external("charge-3"))
+        c.wait_states([again], {"COMPLETED"})
+        self.assertEqual(c.job(again)["result"], f"charge={confirmation};reused=true")
+        self.assertEqual(len(c.provider_charges("charge-3")), 1)
 
     @with_cluster
     def test_crash_during_external_call_is_never_charged_twice(self, c):
