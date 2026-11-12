@@ -66,3 +66,10 @@ add_test(NAME faults COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/faults/test_fau
 set_tests_properties(faults PROPERTIES
   LABELS "faults;db" TIMEOUT 300 SKIP_RETURN_CODE 77
   ENVIRONMENT "EPOCHFLOW_BIN=${PROJECT_BINARY_DIR}/bin")
+
+# Small chaos benchmark in both modes; fails unless the EpochFlow run completes
+# every job with no duplicate effect and no invariant violation. Skipped
+# without EPOCHFLOW_DSN. Labels "bench", "db".
+add_test(NAME bench.smoke
+  COMMAND sh -c "[ -n \"$EPOCHFLOW_DSN\" ] || exit 77; exec python3 '${PROJECT_SOURCE_DIR}/scripts/bench.py' --bin '${PROJECT_BINARY_DIR}/bin' --dsn \"$EPOCHFLOW_DSN\" --mode compare --jobs 60 --chaos-interval-ms 300 --check")
+set_tests_properties(bench.smoke PROPERTIES LABELS "bench;db" TIMEOUT 300 SKIP_RETURN_CODE 77)
