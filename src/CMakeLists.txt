@@ -8,6 +8,8 @@ add_library(epochflow STATIC
   core/job_state.cpp
   store/in_memory_job_store.cpp
   worker/lease_keeper.cpp
+  worker/external_provider.cpp
+  worker/tasks.cpp
   worker/worker.cpp
   runner/local_runner.cpp
 )

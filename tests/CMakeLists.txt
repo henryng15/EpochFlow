@@ -14,6 +14,7 @@ add_executable(epochflow_unit_tests
   unit/lease_keeper_test.cpp
   unit/local_runner_test.cpp
   unit/reclaimer_test.cpp
+  unit/tasks_test.cpp
   unit/worker_test.cpp
   contract/job_store_contract.cpp
 )
