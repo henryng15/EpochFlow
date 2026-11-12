@@ -33,13 +33,26 @@ a lease expire.
 `tests/contract/` holds the behavioral specification of `JobStore` as a
 parameterized GoogleTest suite (`JobStoreContractTest`). Each store provides a
 `StoreHarness` (a fresh store plus `AdvanceTime`) and instantiates the suite;
-the in-memory store does so in `tests/unit/in_memory_job_store_test.cpp`, and
-the PostgreSQL store will reuse it in milestone 3. Contract tests observe only
-the interface and relative time, never absolute timestamps. Checks that depend
-on an exact clock belong next to the specific store.
+the in-memory store does so in `tests/unit/in_memory_job_store_test.cpp` and
+the PostgreSQL store in `tests/integration/pg_job_store_test.cpp`. Contract
+tests observe only the interface and relative time, never absolute timestamps.
+Checks that depend on an exact clock belong next to the specific store.
 
-The suite covers: acquire ordering and exclusivity (including 8 threads racing
-for 200 jobs), stale generation on renew/complete/fail, reassignment after
+A factory may return `nullptr` to skip (the PostgreSQL one does without
+`EPOCHFLOW_DSN`).
+
+**PostgreSQL time:** the store uses the database clock, so the PostgreSQL
+harness implements `AdvanceTime(d)` by moving every `lease_until` back by `d`.
+Lease expiry is the only time-dependent rule, so the store observes exactly
+what a clock jump would produce, and production SQL needs no test hook.
+
+**Isolation:** every PostgreSQL test runs in its own schema
+(`tests/support/pg_test_schema.h`) selected through the DSN's `search_path`,
+with a unique `application_name`, so parallel CTest processes never share rows
+and a test can terminate exactly its own connections.
+
+The suite covers: acquire ordering, exclusivity, and liveness (8 threads racing
+for 200 jobs; no acquire may come back empty while a job is unclaimed), stale generation on renew/complete/fail, reassignment after
 expiry, the window between deadline and reclaim, duplicate and conflicting
 completions, retry limits, and reclaim selectivity.
 
@@ -51,6 +64,12 @@ coordinator, so lease expiry over the wire is still test-driven; it checks every
 `tests/grpc/distributed_test.cpp` uses the system clock with a 300 ms lease to
 run workers against the coordinator and recover a "crashed" assignment (one
 that acquires and never renews).
+
+`tests/e2e/restart_test.sh` (labels `e2e` and `db`) kills the coordinator and
+the worker holding a lease with SIGKILL, restarts the coordinator on the same
+PostgreSQL schema, checks that every job kept its state and generation, and
+expects the interrupted job to finish on attempt 2. It exits 77 (skipped)
+without `EPOCHFLOW_DSN` or `psql`.
 
 `tests/e2e/smoke_test.sh` starts the coordinator on a free port, runs a batch
 through two workers, stops them with SIGTERM (must exit 0), then kills a slow
@@ -98,10 +117,10 @@ cannot pass silently.
 | --- | --- |
 | `tests/unit/` | Unit tests, binary `epochflow_unit_tests` |
 | `tests/contract/` | `JobStore` contract suite and `StoreHarness` |
-| `tests/support/` | `ManualClock`, `WaitUntil` |
+| `tests/support/` | `ManualClock`, `WaitUntil`, `PgTestSchema` |
 | `tests/grpc/` | gRPC tests, binary `epochflow_grpc_tests` |
-| `tests/e2e/` | Process-level smoke test (`e2e.smoke`) |
-| `tests/integration/` | Database tests, binary `epochflow_integration_tests` |
+| `tests/e2e/` | Process-level tests (`e2e.smoke`, `e2e.restart`) |
+| `tests/integration/` | Database tests (contract on PostgreSQL, storage), binary `epochflow_integration_tests` |
 | `docker-compose.test.yml`, `scripts/test-db.sh` | Disposable test database (tmpfs data) |
 
 ## Troubleshooting
@@ -113,8 +132,7 @@ cannot pass silently.
 
 ## Trade-offs and limitations
 
-- Database tests share one database. Tests that write data must isolate
-  themselves (unique IDs or per-test schema) once storage lands in milestone 3.
+- Database tests need Docker locally; CI provides a service container.
 - The e2e test covers one crash point (during work). Crashes at other points,
   pauses, and lost acknowledgements between processes arrive with fault
   injection in milestone 4.

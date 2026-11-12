@@ -72,7 +72,7 @@ when its expected state and generation still match.
 
 1. Build an in-process job runner with a clear state model and tests. **(done)**
 2. Split it into a coordinator and gRPC workers. **(done)**
-3. Add PostgreSQL-backed durable state, leases, and recovery.
+3. Add PostgreSQL-backed durable state, leases, and recovery. **(done)**
 4. Add fencing, idempotent operations, and fault injection.
 5. Package a repeatable multi-worker demo with correctness and recovery metrics.
 
@@ -89,10 +89,11 @@ scripts/test-db.sh up
 EPOCHFLOW_DSN="$(scripts/test-db.sh dsn)" ctest --preset dev
 ```
 
-Run a coordinator, two workers, and ten jobs:
+Run a coordinator on PostgreSQL, two workers, and ten jobs:
 
 ```bash
-build/bin/epochflow-coordinator &
+scripts/test-db.sh up
+build/bin/epochflow-coordinator --dsn="$(scripts/test-db.sh dsn)" &
 build/bin/epochflow-worker --worker-id=w1 --work-ms=200 &
 build/bin/epochflow-worker --worker-id=w2 --work-ms=200 &
 build/bin/epochflowctl wait $(build/bin/epochflowctl submit --payload=hello --count=10)
@@ -105,6 +106,7 @@ See [operations](docs/operations.md) for flags and a crash-recovery walkthrough.
 - [Architecture](docs/architecture.md): components and data/control flows
 - [Invariants](docs/invariants.md): safety properties and their enforcement
 - [Protocol](docs/protocol.md): gRPC API semantics, errors, retry safety
+- [Storage](docs/storage.md): PostgreSQL schema, transactions, migrations
 - [Operations](docs/operations.md): running the binaries, configuration, logs
 - [Testing](docs/testing.md): test layers and how to run them
 - [Decisions](docs/decisions/): ADRs

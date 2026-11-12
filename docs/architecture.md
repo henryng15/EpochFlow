@@ -18,10 +18,10 @@ tracks what exists; planned parts are marked as such.
 
 ## Design
 
-Current status: **milestone 2 (coordinator and gRPC workers)**. A coordinator
-process serves the gRPC API over an in-memory store; worker processes pull jobs
-from it. The in-process `LocalRunner` remains for tests and runs the same
-`Worker` code. Milestone 3 replaces the in-memory store with PostgreSQL.
+Current status: **milestone 3 (durable state)**. A coordinator process serves
+the gRPC API over PostgreSQL (`--dsn`) or, without it, an in-memory store;
+worker processes pull jobs from it. The in-process `LocalRunner` remains for
+tests and runs the same `Worker` code.
 
 ### Job lifecycle
 
@@ -39,15 +39,16 @@ from it. The in-process `LocalRunner` remains for tests and runs the same
 
 Rules and their rationale: [ADR 0002](decisions/0002-job-state-model-and-fencing-rules.md).
 
-### Processes and data flow (milestone 2)
+### Processes and data flow
 
 ```text
 epochflowctl ──SubmitJob / GetJob──┐
                                    ▼
                      epochflow-coordinator
                       ├─ CoordinatorService ── one atomic call per RPC ──▶ JobStore
-                      └─ Reclaimer ── ReclaimExpired() every interval ───▶ (in memory;
-                                   ▲                                       PostgreSQL in M3)
+                      └─ Reclaimer ── ReclaimExpired() every interval ───▶ PgJobStore
+                                   ▲                                       (PostgreSQL), or
+                                   │                                       InMemoryJobStore
      AcquireJob / RenewLease /     │ gRPC (plaintext)
      CompleteJob / FailJob         │
                      epochflow-worker × N
@@ -58,8 +59,10 @@ epochflowctl ──SubmitJob / GetJob──┐
 ```
 
 The store makes every change atomically and enforces fencing; the coordinator
-service, workers, and runner hold no authoritative state. Protocol details:
-[protocol.md](protocol.md).
+service, workers, and runner hold no authoritative state, so a coordinator can
+crash and restart without losing jobs. In PostgreSQL each change is one
+conditional statement and the database clock decides lease expiry. Details:
+[protocol.md](protocol.md), [storage.md](storage.md).
 
 ### In-process mode
 
@@ -76,7 +79,10 @@ See [invariants.md](invariants.md).
 | Renewal rejected or errors (including RPC failure) | Handler is cancelled via its stop token; result discarded |
 | Result report fails in transport | Retried with the same generation (idempotent); if all tries fail, lease expiry recovers the job |
 | Worker killed (SIGKILL) | Lease expires, job reclaimed and re-run with a new generation |
-| Coordinator restart | All state lost in milestone 2 (in-memory store) |
+| Coordinator crash and restart (PostgreSQL) | All committed state survives; leases keep their deadlines; expired ones are reclaimed after restart |
+| Coordinator restart (in-memory mode) | All state lost |
+| PostgreSQL unavailable | RPCs fail with `UNAVAILABLE`; no state changes; work resumes when it returns |
+| Database connection lost | Outcome of the in-flight call unknown (`UNAVAILABLE`); the pool reconnects |
 | Worker stops renewing (crash, pause) | Reclaim re-queues the job after the deadline; the old generation is rejected afterwards |
 | Result arrives after the deadline, before reclaim | Accepted (no newer assignment exists) |
 | Duplicate result for the same generation | Same content: accepted, no change. Different: conflict, no change |
@@ -90,6 +96,8 @@ See [invariants.md](invariants.md).
 | `src/core/job.*`, `src/core/clock.h` | Records, assignment, commit status, time types |
 | `src/core/job_store.h` | `JobStore` contract (atomicity, fencing, errors) |
 | `src/store/in_memory_job_store.*` | Mutex-guarded reference store |
+| `src/store/pg_job_store.*`, `src/store/pg_connection_pool.*` | PostgreSQL store and connection pool |
+| `src/store/migrations.*`, `sql/migrations/` | Schema and embedded migrations |
 | `src/worker/lease_keeper.*` | Background lease renewal with lost-lease signal |
 | `src/worker/work_source.h`, `src/worker/worker.*` | Worker loop over a `WorkSource`; report retries |
 | `src/coordinator/reclaimer.*` | Periodic expired-lease recovery |
@@ -103,10 +111,10 @@ See [invariants.md](invariants.md).
 
 ## Trade-offs and limitations
 
-- The in-memory store is not durable; restart loses all jobs (milestone 3).
+- The in-memory store is not durable; use `--dsn` for anything beyond tests.
 - One coordinator; no coordinator replication in v1.
 - Plaintext, unauthenticated gRPC (see [protocol.md](protocol.md)).
-- PostgreSQL unavailability will block all state transitions (by design in v1).
+- PostgreSQL unavailability blocks all state transitions (by design in v1).
 - `LocalRunner::Stop` and worker shutdown wait for the in-flight job; a task
   that ignores its stop token can delay shutdown indefinitely.
 
@@ -115,7 +123,9 @@ See [invariants.md](invariants.md).
 - [Invariants](invariants.md)
 - [Testing](testing.md)
 - [Protocol](protocol.md)
+- [Storage](storage.md)
 - [Operations](operations.md)
 - [ADR 0001: toolchain and dependencies](decisions/0001-cpp-toolchain-and-dependencies.md)
 - [ADR 0002: job state model and fencing rules](decisions/0002-job-state-model-and-fencing-rules.md)
 - [ADR 0003: coordinator protocol](decisions/0003-coordinator-protocol.md)
+- [ADR 0004: PostgreSQL job store](decisions/0004-postgresql-job-store.md)
