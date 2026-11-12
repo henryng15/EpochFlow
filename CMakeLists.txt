@@ -28,6 +28,7 @@ pkg_check_modules(PQXX REQUIRED IMPORTED_TARGET libpqxx)
 
 add_subdirectory(proto)
 add_subdirectory(src)
+add_subdirectory(apps)
 
 enable_testing()
 add_subdirectory(tests)

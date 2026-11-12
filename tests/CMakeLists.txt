@@ -41,3 +41,8 @@ target_include_directories(epochflow_grpc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(epochflow_grpc_tests PRIVATE epochflow_rpc GTest::gtest_main)
 gtest_discover_tests(epochflow_grpc_tests PROPERTIES LABELS grpc)
 
+# End-to-end: real coordinator and worker processes, including SIGKILL of a
+# worker mid-job. CTest label "e2e".
+add_test(NAME e2e.smoke
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/smoke_test.sh ${PROJECT_BINARY_DIR}/bin)
+set_tests_properties(e2e.smoke PROPERTIES LABELS e2e TIMEOUT 120)

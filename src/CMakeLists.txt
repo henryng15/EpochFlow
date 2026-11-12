@@ -2,6 +2,7 @@
 add_library(epochflow STATIC
   common/flags.cpp
   common/log.cpp
+  common/signals.cpp
   coordinator/reclaimer.cpp
   core/job.cpp
   core/job_state.cpp
