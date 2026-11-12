@@ -1,0 +1,16 @@
+# Job state machine. Render: scripts/render-diagrams.sh
+direction: right
+
+pending: PENDING {shape: oval}
+running: RUNNING {shape: oval}
+completed: COMPLETED {shape: oval; style.fill: "#d3f9d8"}
+failed: FAILED {shape: oval; style.fill: "#ffe3e3"}
+unknown: UNKNOWN {shape: oval; style.fill: "#fff3bf"}
+
+pending -> running: "acquire\n(generation + 1, lease)"
+running -> completed: "complete\n(current generation only)"
+running -> pending: "retryable failure or\nexpired lease, attempts left"
+running -> failed: "non-retryable failure,\nno attempts left"
+running -> unknown: "external effect\nnot confirmed"
+unknown -> completed: "operator reconcile\n(job + operation)"
+unknown -> failed: "operator reconcile\n(no charge at provider)"

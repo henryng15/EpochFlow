@@ -1,0 +1,54 @@
+# EpochFlow architecture: processes, data flow, and where each guarantee is enforced.
+# Render: scripts/render-diagrams.sh
+vars: {
+  d2-config: {
+    # ELK keeps nested containers compact and labels clear of each other.
+    layout-engine: elk
+  }
+}
+direction: right
+
+ctl: "epochflowctl\n(operator CLI)" {
+  shape: rectangle
+}
+
+cluster: "Docker Compose (or local processes)" {
+  icon: https://icons.terrastruct.com/dev%2Fdocker.svg
+  coordinator: "epochflow-coordinator\n(C++20 · gRPC)" {
+    icon: https://icons.terrastruct.com/dev%2Fcplusplus.svg
+    service: "CoordinatorService\none store call per RPC"
+    reclaimer: "Reclaimer\nReclaimExpired() every interval"
+  }
+
+  db: "PostgreSQL 16\n(durable state)" {
+    icon: https://icons.terrastruct.com/dev%2Fpostgresql.svg
+    jobs: "jobs\nstate · generation · lease_until"
+    attempts: "job_attempts\none row per assignment"
+    ops: "operations\nAPPLIED · STARTED · CONFIRMED · FAILED"
+    ledger: "ledger_entries\nUNIQUE (operation_id)"
+  }
+
+  workers: "epochflow-worker × N" {
+    icon: https://icons.terrastruct.com/dev%2Fcplusplus.svg
+    keeper: "LeaseKeeper thread\nRenewLease every lease/3"
+    task: "task(assignment)\npayment · external"
+  }
+
+  coordinator.service -> db: "one atomic, fenced statement per change\n(job RUNNING with this generation)"
+  coordinator.reclaimer -> db.jobs: "expired lease -> PENDING\n(generation + 1 on next acquire)"
+  workers -> coordinator.service: "gRPC: Acquire · Renew · Complete/Fail\nApplyLedger · Begin/ConfirmExternal" {
+    style.animated: true
+  }
+}
+
+provider: "External provider\n(no idempotency keys)" {
+  shape: cloud
+}
+
+ctl -> cluster.coordinator.service: "Submit · Get · Reconcile"
+cluster.workers.task -> provider: "charge once,\nafter a recorded intent"
+
+checker: "check-invariants.sql\n(read-only snapshot)" {
+  shape: page
+}
+checker -> cluster.db: "I2 · I3 · I4 · I8\nafter every test"

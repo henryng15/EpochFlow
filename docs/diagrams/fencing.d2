@@ -1,0 +1,26 @@
+# Lease expiry and fencing: a frozen worker comes back stale. Render: scripts/render-diagrams.sh
+shape: sequence_diagram
+
+a: "worker A"
+c: coordinator
+db: PostgreSQL
+b: "worker B"
+
+a -> c: "AcquireJob"
+c -> db: "PENDING -> RUNNING, generation 1"
+c -> a: "job 7, generation 1, lease 1 s"
+
+a."frozen (SIGSTOP), stops renewing"
+
+c -> db: "reclaim: lease expired -> PENDING"
+b -> c: "AcquireJob"
+c -> db: "RUNNING, generation 2"
+c -> b: "job 7, generation 2"
+
+a -> c: "CompleteJob(7, generation 1)"
+c -> db: "UPDATE ... WHERE generation = 1: 0 rows"
+c -> a: "FAILED_PRECONDITION: stale, discard" {style.stroke: "#e03131"}
+
+b -> c: "CompleteJob(7, generation 2)"
+c -> db: "COMPLETED"
+c -> b: "OK"

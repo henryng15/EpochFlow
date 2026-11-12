@@ -1,0 +1,39 @@
+# External effects: intent, confirmation, UNKNOWN, reconciliation (ADR 0005, ADR 0006).
+# Render: scripts/render-diagrams.sh
+direction: down
+
+begin: "BeginExternal\n(fenced intent: STARTED)"
+start: "START\ncall the provider" {shape: diamond}
+indoubt: "IN_DOUBT\nanother attempt never confirmed"
+confirmed: "CONFIRMED\nreuse the earlier answer"
+opfailed: "FAILED\noperator proved no charge"
+
+charge: "provider.Charge()"
+confirm: "ConfirmExternal\n(retried; identical duplicate = OK)"
+
+completed: "Job COMPLETED" {style.fill: "#d3f9d8"}
+unknown: "Job UNKNOWN\nnever retried automatically" {style.fill: "#fff3bf"}
+jobfailed: "Job FAILED\nno retry" {style.fill: "#ffe3e3"}
+
+reconcile: "epochflowctl reconcile --operation\none transaction: job + operation" {
+  shape: hexagon
+}
+
+begin -> start: "new intent"
+begin -> indoubt
+begin -> confirmed
+begin -> opfailed
+
+start -> charge
+charge -> confirm: "answered"
+charge -> unknown: "timeout"
+confirm -> completed: "accepted (I8)"
+confirm -> unknown: "rejected or\nnot recorded"
+
+indoubt -> unknown
+confirmed -> completed
+opfailed -> jobfailed
+
+unknown -> reconcile: "operator checks\nthe provider"
+reconcile -> completed: "charged:\noperation CONFIRMED"
+reconcile -> jobfailed: "not charged:\noperation FAILED"
