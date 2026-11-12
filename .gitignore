@@ -6,3 +6,4 @@ docs/Proposal.md
 /build-*/
 .env
 .cache/
+__pycache__/
