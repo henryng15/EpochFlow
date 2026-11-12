@@ -120,6 +120,31 @@ TEST_P(JobStoreContractTest, ConcurrentAcquiresAssignEachJobExactlyOnce) {
   EXPECT_EQ(unique.size(), static_cast<std::size_t>(kJobs));
 }
 
+TEST_P(JobStoreContractTest, ConcurrentAcquiresFindAJobWhileAnyIsUnclaimed) {
+  // Liveness: an acquirer must not come back empty just because another
+  // acquirer is claiming a different row at the same moment. Each thread makes
+  // exactly its share of calls, so every call has an unclaimed job available.
+  constexpr int kThreads = 8;
+  constexpr int kPerThread = 25;
+  for (int i = 0; i < kThreads * kPerThread; ++i) store().Submit(Spec("job"));
+
+  std::atomic<int> empty{0};
+  std::atomic<bool> go{false};
+  {
+    std::vector<std::jthread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+      threads.emplace_back([&, t] {
+        while (!go.load()) std::this_thread::yield();
+        for (int i = 0; i < kPerThread; ++i) {
+          if (!store().Acquire("w" + std::to_string(t), kLease)) ++empty;
+        }
+      });
+    }
+    go.store(true);
+  }
+  EXPECT_EQ(empty.load(), 0);
+}
+
 // --- Complete -----------------------------------------------------------------
 
 TEST_P(JobStoreContractTest, CompleteWithCurrentGenerationStoresResult) {

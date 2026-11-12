@@ -26,11 +26,17 @@ class StoreHarness {
   virtual void AdvanceTime(Duration by) = 0;
 };
 
+// Returns a harness with a fresh, empty store, or nullptr to skip.
 using StoreHarnessFactory = std::function<std::unique_ptr<StoreHarness>()>;
 
 class JobStoreContractTest : public ::testing::TestWithParam<StoreHarnessFactory> {
  protected:
-  void SetUp() override { harness_ = GetParam()(); }
+  // A factory returns nullptr when its backend is unavailable (for example no
+  // EPOCHFLOW_DSN); the test is then skipped.
+  void SetUp() override {
+    harness_ = GetParam()();
+    if (!harness_) GTEST_SKIP() << "store backend unavailable";
+  }
 
   JobStore& store() { return harness_->store(); }
   void AdvanceTime(Duration by) { harness_->AdvanceTime(by); }
