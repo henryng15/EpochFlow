@@ -56,3 +56,12 @@ jobs:
       # hide a broken service container, so any skip fails the job.
       - name: Fail on skipped tests
         run: "! grep -q '(Skipped)' ctest.log"
+
+  # Builds the image and runs the crash-and-pause demo on Docker Compose.
+  docker-demo:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the Docker demo
+        run: scripts/demo-docker.sh --jobs 20 --down
