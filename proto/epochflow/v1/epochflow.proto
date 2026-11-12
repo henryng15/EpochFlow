@@ -1,0 +1,139 @@
+// Coordinator API between clients, workers, and the EpochFlow coordinator.
+// Full semantics: docs/protocol.md.
+//
+// Error model (gRPC status codes, shared by all RPCs):
+//   OK                   request applied (or an identical duplicate was recognized)
+//   INVALID_ARGUMENT     malformed request; do not retry unchanged
+//   NOT_FOUND            no job with that id
+//   FAILED_PRECONDITION  stale assignment: the job is not RUNNING with the given
+//                        generation. The worker must discard its work.
+//   ALREADY_EXISTS       duplicate of the request that finished the job, but with
+//                        different content. Nothing changed.
+//   UNAVAILABLE, DEADLINE_EXCEEDED, INTERNAL
+//                        outcome unknown. Retrying RenewLease, CompleteJob and
+//                        FailJob with the same generation is safe.
+
+syntax = "proto3";
+
+package epochflow.v1;
+
+service Coordinator {
+  // Creates a PENDING job. Not idempotent: a retry after a lost response may
+  // create a second job.
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+
+  // Returns a snapshot of a job. Read-only; always safe to retry.
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+
+  // Assigns the oldest PENDING job to the caller with a new generation and a
+  // lease chosen by the coordinator. Returns no assignment when nothing is
+  // PENDING. A retry after a lost response may assign a second job; the first
+  // one is recovered when its lease expires.
+  rpc AcquireJob(AcquireJobRequest) returns (AcquireJobResponse);
+
+  // Extends the caller's lease by the coordinator's lease length. Doubles as
+  // the worker heartbeat. FAILED_PRECONDITION means the lease is lost.
+  rpc RenewLease(RenewLeaseRequest) returns (RenewLeaseResponse);
+
+  // RUNNING -> COMPLETED for the caller's generation.
+  rpc CompleteJob(CompleteJobRequest) returns (CompleteJobResponse);
+
+  // Records a failed attempt: re-queued if retryable and attempts remain,
+  // otherwise FAILED. A retried retryable failure that already re-queued the
+  // job returns FAILED_PRECONDITION, which the worker treats as done.
+  rpc FailJob(FailJobRequest) returns (FailJobResponse);
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_PENDING = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_COMPLETED = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_UNKNOWN = 5;
+}
+
+message Job {
+  int64 job_id = 1;
+  JobState state = 2;
+  int64 generation = 3;
+  // Set only while RUNNING.
+  string worker_id = 4;
+  // Unix milliseconds; 0 unless RUNNING.
+  int64 lease_until_unix_ms = 5;
+  int32 attempts = 6;
+  int32 max_attempts = 7;
+  bytes payload = 8;
+  // Present when COMPLETED.
+  optional bytes result = 9;
+  // Most recent failure or recovery reason, if any.
+  optional string error = 10;
+}
+
+message Assignment {
+  int64 job_id = 1;
+  // Fencing token; send it back with every renewal and result.
+  int64 generation = 2;
+  bytes payload = 3;
+  // Coordinator's deadline in Unix milliseconds, for display. Workers should
+  // schedule renewals from lease_ms instead, since clocks differ.
+  int64 lease_until_unix_ms = 4;
+  // Granted lease length in milliseconds.
+  int64 lease_ms = 5;
+  // 1-based attempt number.
+  int32 attempt = 6;
+}
+
+message SubmitJobRequest {
+  bytes payload = 1;
+  // Total executions allowed. 0 selects the default (3); negative is invalid.
+  int32 max_attempts = 2;
+}
+
+message SubmitJobResponse {
+  int64 job_id = 1;
+}
+
+message GetJobRequest {
+  int64 job_id = 1;
+}
+
+message GetJobResponse {
+  Job job = 1;
+}
+
+message AcquireJobRequest {
+  // Required, non-empty. Recorded for observability; fencing uses generation.
+  string worker_id = 1;
+}
+
+message AcquireJobResponse {
+  // Absent when no job is PENDING.
+  Assignment assignment = 1;
+}
+
+message RenewLeaseRequest {
+  int64 job_id = 1;
+  int64 generation = 2;
+}
+
+message RenewLeaseResponse {
+  int64 lease_until_unix_ms = 1;
+}
+
+message CompleteJobRequest {
+  int64 job_id = 1;
+  int64 generation = 2;
+  bytes result = 3;
+}
+
+message CompleteJobResponse {}
+
+message FailJobRequest {
+  int64 job_id = 1;
+  int64 generation = 2;
+  string reason = 3;
+  bool retryable = 4;
+}
+
+message FailJobResponse {}
