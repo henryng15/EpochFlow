@@ -26,9 +26,12 @@ gtest_discover_tests(epochflow_unit_tests PROPERTIES LABELS unit)
 # CTest label "db".
 add_executable(epochflow_integration_tests
   integration/postgres_smoke_test.cpp
+  integration/pg_job_store_test.cpp
+  contract/job_store_contract.cpp
 )
+target_include_directories(epochflow_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(epochflow_integration_tests PRIVATE
-  PkgConfig::PQXX GTest::gtest_main)
+  epochflow_pg GTest::gtest_main)
 gtest_discover_tests(epochflow_integration_tests PROPERTIES LABELS db)
 
 # gRPC tests: coordinator, client, and workers over loopback. No external
