@@ -59,13 +59,14 @@ constexpr std::string_view kFailSql =
     "UPDATE jobs SET state = CASE WHEN $4 AND attempts < max_attempts "
     "                             THEN 'PENDING' ELSE 'FAILED' END, "
     "error = $3, worker_id = NULL, lease_until = NULL, updated_at = now() "
-    "WHERE " EPOCHFLOW_CURRENT_ASSIGNMENT;
+    "WHERE " EPOCHFLOW_CURRENT_ASSIGNMENT " RETURNING state";
 
 #undef EPOCHFLOW_CURRENT_ASSIGNMENT
 
 // Strictly past deadlines, matching the in-memory store (a lease is still
 // valid at its exact deadline).
 constexpr std::string_view kReclaimSql = R"sql(
+WITH reclaimed AS (
 UPDATE jobs
 SET state = CASE WHEN attempts < max_attempts THEN 'PENDING' ELSE 'FAILED' END,
     error = CASE WHEN attempts < max_attempts THEN 'lease expired'
@@ -74,6 +75,12 @@ SET state = CASE WHEN attempts < max_attempts THEN 'PENDING' ELSE 'FAILED' END,
     lease_until = NULL,
     updated_at = now()
 WHERE state = 'RUNNING' AND lease_until < now()
+RETURNING job_id, generation
+), closed AS (
+  UPDATE job_attempts a SET outcome = 'LEASE_EXPIRED', finished_at = now()
+  FROM reclaimed r WHERE a.job_id = r.job_id AND a.generation = r.generation
+)
+SELECT count(*) FROM reclaimed
 )sql";
 
 TimePoint FromMicros(std::int64_t us) { return TimePoint{std::chrono::microseconds{us}}; }
@@ -128,6 +135,14 @@ CommitStatus ClassifyRejected(pqxx::work& tx, JobId id, Generation generation,
   const bool same = outcome_column == "result" ? ToString(r[2].as<pqxx::bytes>()) == outcome
                                                : r[2].as<std::string>() == outcome;
   return same ? CommitStatus::kAccepted : CommitStatus::kConflict;
+}
+
+// Closes the attempt row of an assignment with `outcome`, in the caller's
+// transaction (see sql/migrations/0003_job_attempts.sql).
+void FinishAttempt(pqxx::work& tx, JobId id, Generation generation, std::string_view outcome) {
+  tx.exec("UPDATE job_attempts SET outcome = $3, finished_at = now() "
+          "WHERE job_id = $1 AND generation = $2",
+          pqxx::params{id, generation, std::string(outcome)});
 }
 
 // Locks the job row in share mode if `id` is RUNNING with `generation`, which
@@ -187,9 +202,11 @@ std::optional<Assignment> PgJobStore::Acquire(const WorkerId& worker, Duration l
   auto conn = pool_.Acquire();
   pqxx::work tx{*conn};
   const pqxx::result rows = tx.exec(kAcquireSql, pqxx::params{worker, lease.count()});
-  tx.commit();
   if (rows.empty()) return std::nullopt;
   const pqxx::row_ref r = rows[0];
+  tx.exec("INSERT INTO job_attempts (job_id, generation, worker_id) VALUES ($1, $2, $3)",
+          pqxx::params{r[0].as<JobId>(), r[1].as<Generation>(), worker});
+  tx.commit();
   return Assignment{r[0].as<JobId>(), r[1].as<Generation>(), ToString(r[2].as<pqxx::bytes>()),
                     FromMicros(r[3].as<std::int64_t>()), lease, r[4].as<int>()};
 }
@@ -213,10 +230,12 @@ CommitStatus PgJobStore::Complete(JobId id, Generation generation, const std::st
   pqxx::work tx{*conn};
   const pqxx::result updated =
       tx.exec(kCompleteSql, pqxx::params{id, generation, pqxx::binary_cast(result)});
-  const CommitStatus status =
-      updated.affected_rows() == 1
-          ? CommitStatus::kAccepted
-          : ClassifyRejected(tx, id, generation, "COMPLETED", "result", result);
+  CommitStatus status = CommitStatus::kAccepted;
+  if (updated.affected_rows() == 1) {
+    FinishAttempt(tx, id, generation, "COMPLETED");
+  } else {
+    status = ClassifyRejected(tx, id, generation, "COMPLETED", "result", result);
+  }
   tx.commit();
   return status;
 }
@@ -226,9 +245,12 @@ CommitStatus PgJobStore::Fail(JobId id, Generation generation, const std::string
   auto conn = pool_.Acquire();
   pqxx::work tx{*conn};
   const pqxx::result updated = tx.exec(kFailSql, pqxx::params{id, generation, reason, retryable});
-  const CommitStatus status = updated.affected_rows() == 1
-                                  ? CommitStatus::kAccepted
-                                  : ClassifyRejected(tx, id, generation, "FAILED", "error", reason);
+  CommitStatus status = CommitStatus::kAccepted;
+  if (!updated.empty()) {
+    FinishAttempt(tx, id, generation, updated[0][0].view() == "PENDING" ? "REQUEUED" : "FAILED");
+  } else {
+    status = ClassifyRejected(tx, id, generation, "FAILED", "error", reason);
+  }
   tx.commit();
   return status;
 }
@@ -346,9 +368,12 @@ CommitStatus PgJobStore::MarkUnknown(JobId id, Generation generation, const std:
       "UPDATE jobs SET state = 'UNKNOWN', error = $3, worker_id = NULL, lease_until = NULL, "
       "updated_at = now() WHERE job_id = $1 AND generation = $2 AND state = 'RUNNING'",
       pqxx::params{id, generation, reason});
-  const CommitStatus status = updated.affected_rows() == 1
-                                  ? CommitStatus::kAccepted
-                                  : ClassifyRejected(tx, id, generation, "UNKNOWN", "error", reason);
+  CommitStatus status = CommitStatus::kAccepted;
+  if (updated.affected_rows() == 1) {
+    FinishAttempt(tx, id, generation, "UNKNOWN");
+  } else {
+    status = ClassifyRejected(tx, id, generation, "UNKNOWN", "error", reason);
+  }
   tx.commit();
   return status;
 }
@@ -389,9 +414,9 @@ CommitStatus PgJobStore::Reconcile(JobId id, JobState outcome, const std::string
 std::size_t PgJobStore::ReclaimExpired() {
   auto conn = pool_.Acquire();
   pqxx::work tx{*conn};
-  const pqxx::result updated = tx.exec(kReclaimSql);
+  const auto reclaimed = tx.query_value<std::int64_t>(kReclaimSql);
   tx.commit();
-  return static_cast<std::size_t>(updated.affected_rows());
+  return static_cast<std::size_t>(reclaimed);
 }
 
 }  // namespace epochflow

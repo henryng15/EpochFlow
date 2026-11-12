@@ -24,6 +24,9 @@ class StoreHarness {
   virtual JobStore& store() = 0;
   // Moves the store's notion of "now" forward.
   virtual void AdvanceTime(Duration by) = 0;
+  // Called after every contract test; reports violations of the store's own
+  // integrity checks with ADD_FAILURE. Default: nothing to check.
+  virtual void VerifyInvariants() {}
 };
 
 // Returns a harness with a fresh, empty store, or nullptr to skip.
@@ -36,6 +39,10 @@ class JobStoreContractTest : public ::testing::TestWithParam<StoreHarnessFactory
   void SetUp() override {
     harness_ = GetParam()();
     if (!harness_) GTEST_SKIP() << "store backend unavailable";
+  }
+
+  void TearDown() override {
+    if (harness_) harness_->VerifyInvariants();
   }
 
   JobStore& store() { return harness_->store(); }

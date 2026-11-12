@@ -11,7 +11,9 @@
 #include <pqxx/pqxx>
 
 #include <chrono>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -20,6 +22,21 @@ namespace {
 
 using std::chrono::milliseconds;
 using std::chrono::seconds;
+
+// Rows of scripts/check-invariants.sql as "invariant|subject|detail".
+std::vector<std::string> InvariantViolations(const std::string& dsn) {
+  std::ifstream file(EPOCHFLOW_SOURCE_DIR "/scripts/check-invariants.sql");
+  std::stringstream sql;
+  sql << file.rdbuf();
+  pqxx::connection conn{dsn};
+  pqxx::read_transaction tx{conn};
+  std::vector<std::string> rows;
+  for (const auto& [invariant, subject, detail] :
+       tx.query<std::string, std::string, std::string>(sql.str())) {
+    rows.push_back(invariant + "|" + subject + "|" + detail);
+  }
+  return rows;
+}
 
 // Moves "now" forward for the store by moving every lease deadline back by
 // the same amount: lease expiry is the only time-dependent rule, so the store
@@ -32,6 +49,15 @@ class PgHarness final : public StoreHarness {
   }
 
   JobStore& store() override { return *store_; }
+
+  // Every contract scenario must leave a database that passes the invariant
+  // checker. "recovery stalled" is a liveness check; tests that move time far
+  // ahead without reclaiming trip it on purpose.
+  void VerifyInvariants() override {
+    for (const std::string& v : InvariantViolations(schema_.dsn())) {
+      if (!v.starts_with("recovery stalled")) ADD_FAILURE() << "invariant violation: " << v;
+    }
+  }
 
   void AdvanceTime(Duration by) override {
     pqxx::connection conn{schema_.dsn()};
@@ -196,6 +222,89 @@ TEST_F(PgJobStoreTest, SchemaRejectsRowsNoTransitionCanProduce) {
       "INSERT INTO jobs (attempts, max_attempts, payload) VALUES (4, 3, 'x')"));
   // Unknown state.
   EXPECT_TRUE(insert_fails("INSERT INTO jobs (state, max_attempts, payload) VALUES ('DONE', 3, 'x')"));
+}
+
+
+TEST_F(PgJobStoreTest, AttemptsTraceEveryAssignment) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  const JobId id = store.Submit({"a", 3});
+  store.Acquire("crashes", milliseconds{50});
+  std::this_thread::sleep_for(milliseconds{150});
+  ASSERT_EQ(store.ReclaimExpired(), 1u);
+  const auto second = store.Acquire("fails", seconds{30});
+  store.Fail(id, second->generation, "transient", true);
+  const auto third = store.Acquire("finishes", seconds{30});
+  store.Complete(id, third->generation, "ok");
+
+  pqxx::connection conn{Dsn()};
+  pqxx::read_transaction tx{conn};
+  std::vector<std::string> trace;
+  for (const auto& [generation, worker, outcome] : tx.query<int, std::string, std::string>(
+           "SELECT generation, worker_id, outcome FROM job_attempts WHERE job_id = $1 "
+           "ORDER BY generation",
+           pqxx::params{id})) {
+    trace.push_back(std::to_string(generation) + ":" + worker + ":" + outcome);
+  }
+  EXPECT_EQ(trace, (std::vector<std::string>{"1:crashes:LEASE_EXPIRED", "2:fails:REQUEUED",
+                                             "3:finishes:COMPLETED"}));
+}
+
+TEST_F(PgJobStoreTest, InvariantCheckerPassesAfterValidOperations) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  // A mix of every terminal path, a running job, and a deduplicated effect.
+  const JobId done = store.Submit({"done", 3});
+  const JobId failed = store.Submit({"failed", 1});
+  const JobId unknown = store.Submit({"unknown", 3});
+  const JobId reconciled = store.Submit({"reconciled", 3});
+  const JobId running = store.Submit({"running", 3});
+  const auto d = store.Acquire("w", seconds{30});
+  store.ApplyLedger(done, d->generation, "op-1", LedgerEntry{"alice", 5});
+  store.ApplyLedger(done, d->generation, "op-1", LedgerEntry{"alice", 5});
+  store.Complete(done, d->generation, "ok");
+  const auto f = store.Acquire("w", seconds{30});
+  store.Fail(failed, f->generation, "fatal", true);  // last attempt
+  const auto u = store.Acquire("w", seconds{30});
+  store.BeginExternal(unknown, u->generation, "ext-1", "req");
+  store.MarkUnknown(unknown, u->generation, "timeout");
+  const auto r = store.Acquire("w", seconds{30});
+  store.MarkUnknown(reconciled, r->generation, "timeout");
+  store.Reconcile(reconciled, JobState::kCompleted, "evidence");
+  ASSERT_EQ(store.Acquire("w", seconds{30})->job_id, running);
+
+  EXPECT_EQ(InvariantViolations(Dsn()), std::vector<std::string>{});
+}
+
+TEST_F(PgJobStoreTest, InvariantCheckerReportsInjectedViolations) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  const JobId id = store.Submit({"a", 3});
+  const auto a = store.Acquire("w", seconds{30});
+  store.Complete(id, a->generation, "ok");
+  {
+    // Forge what a broken store could produce: a second deciding attempt from
+    // a stale generation, and a ledger operation without its entry.
+    pqxx::connection conn{Dsn()};
+    pqxx::work tx{conn};
+    tx.exec("UPDATE jobs SET generation = 2, attempts = 2 WHERE job_id = $1", pqxx::params{id});
+    tx.exec("INSERT INTO job_attempts (job_id, generation, worker_id, finished_at, outcome) "
+            "VALUES ($1, 2, 'ghost', now(), 'COMPLETED')",
+            pqxx::params{id});
+    tx.exec("INSERT INTO operations (operation_id, kind, request, status, job_id, generation) "
+            "VALUES ('orphan', 'LEDGER', 'x', 'APPLIED', $1, 1)",
+            pqxx::params{id});
+    tx.commit();
+  }
+
+  const auto violations = InvariantViolations(Dsn());
+  const auto has = [&](const std::string& prefix) {
+    return std::any_of(violations.begin(), violations.end(),
+                       [&](const std::string& v) { return v.starts_with(prefix); });
+  };
+  EXPECT_TRUE(has("I3 one deciding attempt|job " + std::to_string(id)));
+  EXPECT_TRUE(has("I3 outcome from current generation|job " + std::to_string(id)));
+  EXPECT_TRUE(has("I4 ledger operation has entry|operation orphan"));
 }
 
 }  // namespace

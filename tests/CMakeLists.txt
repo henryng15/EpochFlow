@@ -30,6 +30,8 @@ add_executable(epochflow_integration_tests
   contract/job_store_contract.cpp
 )
 target_include_directories(epochflow_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(epochflow_integration_tests PRIVATE
+  EPOCHFLOW_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(epochflow_integration_tests PRIVATE
   epochflow_pg GTest::gtest_main)
 gtest_discover_tests(epochflow_integration_tests PROPERTIES LABELS db)
