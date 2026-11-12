@@ -49,3 +49,9 @@ gtest_discover_tests(epochflow_grpc_tests PROPERTIES LABELS grpc)
 add_test(NAME e2e.smoke
   COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/smoke_test.sh ${PROJECT_BINARY_DIR}/bin)
 set_tests_properties(e2e.smoke PROPERTIES LABELS e2e TIMEOUT 120)
+
+# Coordinator restart against PostgreSQL. Needs EPOCHFLOW_DSN and psql; the
+# script exits 77 (reported as skipped) without them. CTest labels "e2e", "db".
+add_test(NAME e2e.restart
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/restart_test.sh ${PROJECT_BINARY_DIR}/bin)
+set_tests_properties(e2e.restart PROPERTIES LABELS "e2e;db" TIMEOUT 120 SKIP_RETURN_CODE 77)
