@@ -73,7 +73,7 @@ when its expected state and generation still match.
 1. Build an in-process job runner with a clear state model and tests. **(done)**
 2. Split it into a coordinator and gRPC workers. **(done)**
 3. Add PostgreSQL-backed durable state, leases, and recovery. **(done)**
-4. Add fencing, idempotent operations, and fault injection.
+4. Add fencing, idempotent operations, and fault injection. **(done)**
 5. Package a repeatable multi-worker demo with correctness and recovery metrics.
 
 ## Quick start
@@ -108,7 +108,7 @@ See [operations](docs/operations.md) for flags and a crash-recovery walkthrough.
 - [Protocol](docs/protocol.md): gRPC API semantics, errors, retry safety
 - [Storage](docs/storage.md): PostgreSQL schema, transactions, migrations
 - [Operations](docs/operations.md): running the binaries, configuration, logs
-- [Testing](docs/testing.md): test layers and how to run them
+- [Testing](docs/testing.md): test layers, fault-injection scenarios, invariant checks
 - [Decisions](docs/decisions/): ADRs
 
 Contribution and agent working rules are in [`AGENTS.md`](AGENTS.md).

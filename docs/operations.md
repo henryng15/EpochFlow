@@ -47,7 +47,9 @@ again with `generation=2`.
 | coordinator | `--db-pool-size` | 4 | PostgreSQL connections |
 | worker | `--coordinator` | `127.0.0.1:50051` | Coordinator address |
 | worker | `--worker-id` | `HOST-PID` | Identity in job records and logs |
-| worker | `--work-ms` | 0 | Duration of the built-in demo task |
+| worker | `--work-ms` | 0 | Simulated processing time per job, before its side effect |
+| worker | `--provider-log` | none | File acting as the external provider; required for `task=external` jobs |
+| worker | `--fault` | none | Test only: inject one failure (see `epochflow-worker --help`) |
 | worker | `--rpc-timeout-ms` | 5000 | Deadline per RPC |
 | worker | `--idle-backoff-ms` | 200 | Wait when no job is available |
 | epochflowctl | `--coordinator` | `127.0.0.1:50051` | Coordinator address |
@@ -62,13 +64,53 @@ renewal can take up to `rpc-timeout`, so it lands in time only if
 of `--lease-ms` (the defaults, 5000 and 10000, satisfy this). Leave headroom
 for slow networks.
 
+### Job payloads
+
+| Payload | Effect |
+| --- | --- |
+| `task=payment;account=A;amount_cents=N[;op=ID]` | One ledger entry per `op` (default `job-<id>`) |
+| `task=external;account=A;amount_cents=N[;op=ID]` | At most one provider charge per `op` |
+| anything else | Echo: result `processed:<payload>` |
+
+Use a stable `op` for anything a client might submit twice (for example an
+order number): every job with that `op` and content shares one effect.
+
+### Resolving UNKNOWN jobs
+
+A job is `UNKNOWN` when the worker could not tell whether the external charge
+happened. It stays that way until resolved:
+
+1. Find it: `epochflowctl get JOB_ID` shows `state=UNKNOWN` and the reason in
+   `error`; `SELECT job_id, error FROM jobs WHERE state = 'UNKNOWN'` lists all.
+2. Check the provider's own record for the operation id (with the file
+   provider: `awk -F'\t' '$1 == "OPERATION_ID"' PROVIDER_LOG`; the third
+   column is the confirmation).
+3. Record the decision:
+   - charged: `epochflowctl reconcile JOB_ID --outcome=completed --detail=CONFIRMATION`
+   - not charged: `epochflowctl reconcile JOB_ID --outcome=failed --detail="no charge at provider"`
+
+Do not resubmit the job to "try again" without checking: that is exactly the
+double charge `UNKNOWN` exists to prevent.
+
+### Checking invariants
+
+```bash
+psql "$DSN" -X -q -tA -F '|' -f scripts/check-invariants.sql
+```
+
+No output means every safety check passed. It is a single read-only
+statement, so it sees one consistent snapshot and is safe on a live system. A
+`recovery stalled` row means a `RUNNING` job's lease expired over a minute ago
+and no coordinator is reclaiming.
+
 ### Logs
 
 Each process logs one line per event to stderr, prefixed with a UTC timestamp.
 Coordinator: `coordinator started store=postgres|memory`, `assigned`,
-`reclaimed`, `rejected completion`, store errors.
-Worker: `acquired`, `reported ... status=`, `lease lost`, `report attempt
-failed`, `gave up reporting`.
+`reclaimed`, `rejected completion`, `deduplicated operation`, `rejected
+operation`, `in doubt operation`, `unknown job`, `reconciled job`, store errors.
+Worker: `acquired`, `reported success|failure|unknown ... status=`, `lease
+lost`, `report attempt failed`, `gave up reporting`, `fault=... firing`.
 
 ## Verification
 
@@ -85,6 +127,10 @@ runs the same scenario automatically, including the SIGKILL recovery.
   the worker keeps retrying every idle backoff.
 - **Jobs re-run though workers are healthy (`lease lost`)**: renewals are not
   arriving in time; raise `--lease-ms` or lower `--rpc-timeout-ms`.
+- **A job is `UNKNOWN`**: see "Resolving UNKNOWN jobs" above.
+- **A payment job `FAILED` with `conflicts with an earlier request`**: its `op`
+  was already used with different content; choose a new `op` if it is really a
+  different payment.
 - **All jobs vanished after a restart**: the coordinator ran without `--dsn`
   (its log says `store=memory`).
 - **`database schema is at version N, expected M`**: a newer binary needs a

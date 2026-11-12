@@ -30,16 +30,26 @@ own monotonic clock, so worker and coordinator clocks need not agree.
 | `RenewLease` | Lease deadline = now + lease | Safe |
 | `CompleteJob` | `RUNNING` to `COMPLETED` | Safe: a duplicate with the same result returns `OK` |
 | `FailJob` | Re-queue (retryable, attempts left) or `FAILED` | Safe: final failure duplicate returns `OK`; re-queued duplicate returns `FAILED_PRECONDITION` |
+| `ApplyLedgerOperation` | Ledger entry once per `operation_id` (fenced); returns `entry_id`, `deduplicated` | Safe: returns the original entry |
+| `BeginExternalOperation` | Records intent (fenced); returns `START`, `IN_DOUBT`, or `CONFIRMED` (+ confirmation) | Safe within the same attempt (`START` again) |
+| `ConfirmExternalOperation` | Stores the provider's confirmation (not fenced) | Safe: same confirmation returns `OK` |
+| `MarkJobUnknown` | `RUNNING` to `UNKNOWN` (fenced) | Safe: same reason returns `OK` |
+| `ReconcileJob` | Operator: `UNKNOWN` to `COMPLETED`/`FAILED` with `detail` | Safe: same decision returns `OK` |
+
+**External operation states:** `START` means call the provider, then confirm;
+`IN_DOUBT` means another attempt recorded the intent and never confirmed, so
+the worker must not call the provider and reports `UNKNOWN` instead;
+`CONFIRMED` returns the earlier answer for reuse.
 
 ### Error model
 
 | Code | Meaning | Worker action |
 | --- | --- | --- |
 | `OK` | Applied, or identical duplicate recognized | Continue |
-| `INVALID_ARGUMENT` | Malformed request (negative `max_attempts`, empty `worker_id`) | Fix the request |
+| `INVALID_ARGUMENT` | Malformed request (negative `max_attempts`, empty `worker_id` or `operation_id`, non-terminal reconcile outcome) | Fix the request |
 | `NOT_FOUND` | Unknown job id | Drop |
-| `FAILED_PRECONDITION` | Stale assignment: job not `RUNNING` with this generation | **Stop work, discard result** |
-| `ALREADY_EXISTS` | Duplicate of the finishing request with different content | Drop; outcome unchanged |
+| `FAILED_PRECONDITION` | Stale assignment: job not `RUNNING` with this generation (reconcile: job not `UNKNOWN`) | **Stop work, discard result** |
+| `ALREADY_EXISTS` | Duplicate of the finishing request with different content, or an `operation_id` reused with different content or kind | Drop; outcome unchanged; for operations, fail the job without retry |
 | `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `INTERNAL` | Outcome unknown | Retry idempotent calls with the same generation |
 
 ## Invariants and failure semantics
@@ -55,9 +65,14 @@ own monotonic clock, so worker and coordinator clocks need not agree.
   generation, a retry after a lost acknowledgement returns `OK` instead of
   looking stale. If every try fails, the job stays `RUNNING` until its lease
   expires and is reclaimed, then runs again.
-- **Duplicate attempts are possible** (crash after work, before report). The
-  protocol prevents a stale attempt from overwriting a newer one; it does not
-  deduplicate side effects. That is milestone 4 (idempotent operations).
+- **Duplicate attempts are possible** (crash after work, before report). Their
+  side effects are not duplicated: ledger effects go through
+  `ApplyLedgerOperation` (deduplicated by `operation_id`), and external calls
+  are bracketed by `BeginExternalOperation`/`ConfirmExternalOperation` so an
+  attempt never repeats a call whose outcome is unknown.
+- **Uncertainty is reported, not guessed.** A provider timeout or an
+  unconfirmed earlier intent becomes `MarkJobUnknown`; the job waits for
+  `ReconcileJob`.
 
 ## Implementation map
 
@@ -94,3 +109,4 @@ loopback connection; `tests/grpc/distributed_test.cpp` and
 - [Invariants](invariants.md)
 - [Operations](operations.md)
 - [ADR 0003: coordinator protocol](decisions/0003-coordinator-protocol.md)
+- [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)

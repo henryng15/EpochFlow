@@ -1,4 +1,5 @@
--- EpochFlow invariant checker. Run against a schema at rest (no RPCs in flight):
+-- EpochFlow invariant checker. One read-only statement, so it sees a single
+-- consistent snapshot and is safe to run against a live system:
 --   psql "$DSN" -X -q -tA -F '|' -f scripts/check-invariants.sql
 -- Prints one line per violation as "invariant|subject|detail"; no output means
 -- every check passed. Invariant ids refer to docs/invariants.md. The checks are

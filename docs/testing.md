@@ -15,8 +15,9 @@ each layer must cover.
   loopback connection in one process. No external services.
 - **End-to-end tests** (CTest label `e2e`): real `epochflow-coordinator`,
   `epochflow-worker`, and `epochflowctl` processes driven by a shell script.
-- **Fault-injection tests** (planned, milestone 4): crash, pause, or duplicate
-  requests at chosen points with an invariant checker.
+- **Fault-injection tests** (CTest labels `faults` and `db`): real processes
+  and PostgreSQL; one failure injected per scenario, then the SQL invariant
+  checker.
 
 ## Design
 
@@ -76,6 +77,47 @@ through two workers, stops them with SIGTERM (must exit 0), then kills a slow
 worker with SIGKILL mid-job and expects another worker to finish the job with
 `attempts=2` and `generation=2`.
 
+### Fault injection
+
+`tests/faults/test_faults.py` (Python standard library `unittest`, no
+dependencies) gives every scenario a fresh schema, a coordinator with a 1.5 s
+lease, workers, and a provider log. Failures come from the worker's `--fault`
+flag, which fires once per process at a precise point (`raise()` on the
+calling thread, so the process stops before running another line), from
+SIGCONT by the harness, and from SIGKILL of the coordinator.
+
+| Scenario | Expected outcome |
+| --- | --- |
+| Crash right after acquire | Reassigned; attempt trace `LEASE_EXPIRED`, `COMPLETED` |
+| Crash right after the ledger effect | Re-run deduplicates; one entry |
+| Pause before the effect, resume after reassignment | Stale effect rejected; entry belongs to generation 2 |
+| Pause before reporting, resume after reassignment | Stale completion rejected; result from generation 2 |
+| Report acknowledgement lost | Retried, accepted as duplicate; one attempt |
+| Same request twice, plus a conflicting reuse | One entry; conflict fails without retry |
+| Coordinator SIGKILL mid-run (60 jobs, 3 workers) | All complete; 60 distinct entries with the right total |
+| Provider times out after charging | `UNKNOWN`, not retried; reconciled by `epochflowctl` |
+| Crash after the provider charged, before confirming | Next attempt `UNKNOWN`; provider charged once |
+
+Every scenario, and every PostgreSQL contract test (through
+`StoreHarness::VerifyInvariants`), ends by running
+`scripts/check-invariants.sql`; any reported row fails the test. On failure the
+harness prints every process log.
+
+```bash
+EPOCHFLOW_DSN="$(scripts/test-db.sh dsn)" ctest --preset dev -L faults --output-on-failure
+# one scenario:
+EPOCHFLOW_BIN=build/bin EPOCHFLOW_DSN=... python3 tests/faults/test_faults.py \
+  FaultScenarios.test_crash_after_effect_is_deduplicated
+```
+
+### Mutation checks
+
+Key guarantees were verified by breaking them on purpose and confirming the
+suite fails: removing the generation check from completion or from
+`ApplyLedger`, mapping stale to `OK` on the wire, disabling report retries,
+removing `SKIP LOCKED`, treating every external intent as the same attempt,
+and skipping the attempt trace. Repeat this after changing enforcement code.
+
 ### Threaded components
 
 `LeaseKeeper` and `LocalRunner` tests run real threads with short intervals and
@@ -120,6 +162,8 @@ cannot pass silently.
 | `tests/support/` | `ManualClock`, `WaitUntil`, `PgTestSchema` |
 | `tests/grpc/` | gRPC tests, binary `epochflow_grpc_tests` |
 | `tests/e2e/` | Process-level tests (`e2e.smoke`, `e2e.restart`) |
+| `tests/faults/` | Fault-injection scenarios (`faults`) |
+| `scripts/check-invariants.sql` | Invariant checker used by tests and operators |
 | `tests/integration/` | Database tests (contract on PostgreSQL, storage), binary `epochflow_integration_tests` |
 | `docker-compose.test.yml`, `scripts/test-db.sh` | Disposable test database (tmpfs data) |
 
@@ -133,9 +177,10 @@ cannot pass silently.
 ## Trade-offs and limitations
 
 - Database tests need Docker locally; CI provides a service container.
-- The e2e test covers one crash point (during work). Crashes at other points,
-  pauses, and lost acknowledgements between processes arrive with fault
-  injection in milestone 4.
+- Fault points are fixed, not randomized; each scenario injects one failure.
+  Randomized multi-failure runs belong to the milestone 5 benchmark.
+- Timing-based scenarios use a 1.5 s lease; a heavily loaded machine could slow
+  them but not change their assertions.
 - The ThreadSanitizer preset builds unit tests only; gRPC's own libraries are
   not instrumented, which would produce false reports.
 
@@ -146,3 +191,4 @@ cannot pass silently.
 - [ADR 0001: toolchain and dependencies](decisions/0001-cpp-toolchain-and-dependencies.md)
 - [ADR 0002: job state model and fencing rules](decisions/0002-job-state-model-and-fencing-rules.md)
 - [Protocol](protocol.md)
+- [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)

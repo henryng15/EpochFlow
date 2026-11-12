@@ -18,7 +18,10 @@ handling.
 
 ### Schema
 
-`sql/migrations/0001_jobs.sql` creates one table:
+Three migrations: `0001_jobs.sql` (jobs), `0002_operations.sql` (operations
+and ledger), `0003_job_attempts.sql` (attempt trace).
+
+**`jobs`**
 
 | Column | Type | Meaning |
 | --- | --- | --- |
@@ -37,6 +40,27 @@ above the limit, a non-`PENDING` job with generation 0, unknown states. Partial
 indexes serve the two hot queries: `PENDING` by id (acquire) and `RUNNING` by
 deadline (reclaim).
 
+**`operations`**: one row per logical side effect, keyed by a caller-chosen
+`operation_id` that stays the same across attempts and duplicate jobs.
+
+| Column | Meaning |
+| --- | --- |
+| `operation_id` | Primary key, non-empty |
+| `kind` | `LEDGER` (owned effect) or `EXTERNAL` (third-party call) |
+| `request` | Canonical content; reuse with different content is a conflict |
+| `status` | `APPLIED` (ledger), `STARTED` (external intent), `CONFIRMED` (external answer recorded) |
+| `job_id`, `generation` | The assignment that created the row |
+| `result` | Provider confirmation, present exactly when `CONFIRMED` |
+
+**`ledger_entries`**: the owned demonstration effect; `UNIQUE (operation_id)`
+makes a second entry for one operation impossible. Records the job and
+generation that applied it.
+
+**`job_attempts`**: one row per assignment (`PRIMARY KEY (job_id,
+generation)`), with `worker_id`, start and finish times, and `outcome`:
+`COMPLETED`, `FAILED`, `REQUEUED`, `LEASE_EXPIRED`, `UNKNOWN`, or `NULL` while
+the attempt holds the job. Not backfilled for jobs assigned before migration 3.
+
 ### State changes
 
 Every `PgJobStore` method is one transaction at the default `READ COMMITTED`
@@ -50,6 +74,24 @@ isolation:
 | Complete | Fenced `UPDATE ... SET state='COMPLETED', result=$3`, clear lease |
 | Fail | Fenced `UPDATE ... SET state = CASE WHEN retryable AND attempts < max_attempts THEN 'PENDING' ELSE 'FAILED' END` |
 | Reclaim | `UPDATE ... WHERE state='RUNNING' AND lease_until < now()`: `PENDING` or `FAILED` by attempts |
+| MarkUnknown | Fenced `UPDATE ... SET state='UNKNOWN', error=$3`, clear lease |
+| Reconcile | `UPDATE ... WHERE job_id=$1 AND state='UNKNOWN'` to `COMPLETED` (result) or `FAILED` (error) |
+| ApplyLedger | Fenced `SELECT ... FOR SHARE` on the job; `INSERT INTO operations ... ON CONFLICT DO NOTHING`; if inserted, `INSERT INTO ledger_entries`; otherwise read the existing operation and entry |
+| BeginExternal | Fenced `SELECT ... FOR SHARE`; `INSERT ... 'STARTED' ON CONFLICT DO NOTHING`; otherwise read status, creator, and confirmation |
+| ConfirmExternal | `UPDATE operations SET status='CONFIRMED', result=$3 WHERE ... status='STARTED'` (not fenced) |
+
+Every job change that starts or ends an assignment also writes `job_attempts`
+in the same transaction: acquire inserts the row; complete, fail, mark-unknown,
+and reclaim close it with the matching outcome (reclaim through a
+data-modifying CTE).
+
+**Fenced effects.** `ApplyLedger` and `BeginExternal` first lock the job row
+with `FOR SHARE` under the fencing predicate. Reclaim, reassignment, and
+completion need a row-exclusive lock, so they wait until the effect's
+transaction ends: the check and the effect are atomic, and an effect can never
+be recorded for an assignment that was superseded mid-transaction. Concurrent
+inserts of the same `operation_id` serialize on the primary key; the loser's
+`ON CONFLICT DO NOTHING` waits for the winner and then reads its row.
 
 When a fenced update matches no row, a follow-up `SELECT` in the same
 transaction classifies the request: no row is `kNotFound`; the job finished by
@@ -91,6 +133,9 @@ version. The schema used is the connection's `search_path` (for example
 - **Claim liveness:** `SKIP LOCKED` makes concurrent acquirers take different
   rows; without it they queue on the same row and the losers return empty
   while jobs remain (caught by `ConcurrentAcquiresFindAJobWhileAnyIsUnclaimed`).
+- **I4:** one ledger entry per operation id, by `UNIQUE` plus the transaction
+  above; external calls are guarded by the intent record (see
+  [ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md)).
 - **I6:** every acknowledged change is committed before the RPC returns.
 - **Ambiguous outcomes:** a connection lost mid-transaction or during commit
   (`pqxx::broken_connection`, `pqxx::in_doubt_error`) propagates; the
@@ -104,7 +149,8 @@ version. The schema used is the connection's `search_path` (for example
 
 | Path | Contents |
 | --- | --- |
-| `sql/migrations/0001_jobs.sql` | Schema and constraints |
+| `sql/migrations/` | Schema and constraints (jobs, operations, ledger, attempts) |
+| `scripts/check-invariants.sql` | Read-only invariant checker |
 | `src/store/migrations.*`, `src/store/embedded_migrations.cpp.in` | Migration runner and embedding |
 | `src/store/pg_connection_pool.*` | Connection pool |
 | `src/store/pg_job_store.*` | SQL for every operation |
@@ -113,17 +159,14 @@ version. The schema used is the connection's `search_path` (for example
 
 ## Operating and testing
 
-See [operations.md](operations.md) for `--dsn` and [testing.md](testing.md) for
-how the contract suite moves database time.
+See [operations.md](operations.md) for `--dsn` and the invariant checker, and
+[testing.md](testing.md) for how the contract suite moves database time.
 
 ## Trade-offs and limitations
 
-- **Single table, no attempt history.** Recovery traces (which worker ran which
-  generation) come from logs for now; an attempts table arrives with fault
-  injection in milestone 4, where traces are needed.
+- **No retention policy** for jobs, operations, ledger entries, or attempts.
 - **Polling reclaim:** one `UPDATE` per reclaim interval per coordinator. Running
   several coordinators is safe but each runs its own reclaim.
-- **No job retention policy:** finished jobs stay forever.
 - **Transitions are enforced in C++ SQL, not by a trigger.** `CHECK`
   constraints catch impossible rows but not every illegal transition (for
   example `FAILED` back to `PENDING`).
@@ -135,3 +178,4 @@ how the contract suite moves database time.
 - [Invariants](invariants.md)
 - [Operations](operations.md)
 - [ADR 0004: PostgreSQL job store](decisions/0004-postgresql-job-store.md)
+- [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)

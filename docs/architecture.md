@@ -18,10 +18,12 @@ tracks what exists; planned parts are marked as such.
 
 ## Design
 
-Current status: **milestone 3 (durable state)**. A coordinator process serves
-the gRPC API over PostgreSQL (`--dsn`) or, without it, an in-memory store;
-worker processes pull jobs from it. The in-process `LocalRunner` remains for
-tests and runs the same `Worker` code.
+Current status: **milestone 4 (idempotency, UNKNOWN, fault injection)**. A
+coordinator process serves the gRPC API over PostgreSQL (`--dsn`) or, without
+it, an in-memory store; worker processes pull jobs and run demonstration tasks
+whose side effects are deduplicated (owned ledger) or guarded against blind
+repetition (external provider). The in-process `LocalRunner` remains for tests
+and runs the same `Worker` code.
 
 ### Job lifecycle
 
@@ -34,7 +36,7 @@ tests and runs the same `Worker` code.
                                              ├────────────────▶ FAILED
                                              │
                                              └─ unconfirmed ──▶ UNKNOWN ──reconcile──▶ COMPLETED | FAILED
-                                                external effect          (milestone 4)
+                                                external effect          (operator)
 ```
 
 Rules and their rationale: [ADR 0002](decisions/0002-job-state-model-and-fencing-rules.md).
@@ -64,6 +66,21 @@ crash and restart without losing jobs. In PostgreSQL each change is one
 conditional statement and the database clock decides lease expiry. Details:
 [protocol.md](protocol.md), [storage.md](storage.md).
 
+### Side effects
+
+```text
+payment task                         external task
+  ApplyLedgerOperation(op)             BeginExternalOperation(op)
+    └ store, one transaction:            ├ START     → provider.Charge → ConfirmExternalOperation
+      fence + operation + entry          ├ CONFIRMED → reuse the earlier answer
+      (repeat op → same entry)           └ IN_DOUBT  → MarkJobUnknown (never call again)
+                                       provider timeout → MarkJobUnknown
+```
+
+An `operation_id` (payload `op`, default `job-<id>`) names one logical effect
+across attempts and duplicate jobs. Details:
+[ADR 0005](decisions/0005-idempotent-operations-and-unknown-outcomes.md).
+
 ### In-process mode
 
 `LocalRunner` wires N `Worker`s to the store through `StoreWorkSource` and runs
@@ -79,6 +96,12 @@ See [invariants.md](invariants.md).
 | Renewal rejected or errors (including RPC failure) | Handler is cancelled via its stop token; result discarded |
 | Result report fails in transport | Retried with the same generation (idempotent); if all tries fail, lease expiry recovers the job |
 | Worker killed (SIGKILL) | Lease expires, job reclaimed and re-run with a new generation |
+| Worker crashes after an owned effect, before reporting | Re-run deduplicates: the original ledger entry is returned |
+| Worker paused, resumes after reassignment | Its effect and its report are rejected as stale; nothing changes |
+| Same logical request submitted twice | One effect; the second job reports the deduplicated entry |
+| `operation_id` reused with different content | Job fails without retry (conflict) |
+| External provider times out | Job `UNKNOWN`; not retried until an operator reconciles |
+| Worker crashes during an external call | Next attempt finds the unconfirmed intent and reports `UNKNOWN` instead of charging again |
 | Coordinator crash and restart (PostgreSQL) | All committed state survives; leases keep their deadlines; expired ones are reclaimed after restart |
 | Coordinator restart (in-memory mode) | All state lost |
 | PostgreSQL unavailable | RPCs fail with `UNAVAILABLE`; no state changes; work resumes when it returns |
@@ -104,7 +127,9 @@ See [invariants.md](invariants.md).
 | `src/coordinator/coordinator*.*` | gRPC service and server |
 | `src/client/coordinator_client.*` | gRPC client (`WorkSource`) |
 | `src/rpc/convert.*` | Wire conversion and status mapping |
+| `src/worker/tasks.*`, `src/worker/external_provider.*` | Demonstration tasks and the simulated provider |
 | `src/runner/local_runner.*` | In-process workers and reclaimer |
+| `scripts/check-invariants.sql` | SQL invariant checker |
 | `apps/` | `epochflow-coordinator`, `epochflow-worker`, `epochflowctl` |
 | `proto/epochflow/v1/` | Protocol schema |
 | `tests/contract/` | Behavioral suite every `JobStore` must pass |
@@ -129,3 +154,4 @@ See [invariants.md](invariants.md).
 - [ADR 0002: job state model and fencing rules](decisions/0002-job-state-model-and-fencing-rules.md)
 - [ADR 0003: coordinator protocol](decisions/0003-coordinator-protocol.md)
 - [ADR 0004: PostgreSQL job store](decisions/0004-postgresql-job-store.md)
+- [ADR 0005: idempotent operations and UNKNOWN outcomes](decisions/0005-idempotent-operations-and-unknown-outcomes.md)
