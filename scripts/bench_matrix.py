@@ -211,6 +211,14 @@ def fmt(value):
     return str(value)
 
 
+def fmt_stat(st, key):
+    """Counts (integer min) keep their median as 2 or 2.5, not 2.00, which reads as a measurement."""
+    value = st[key]
+    if isinstance(st["min"], int) and isinstance(value, float):
+        return f"{value:g}"
+    return fmt(value)
+
+
 def load_rows(path):
     if not os.path.exists(path):
         return []
@@ -327,7 +335,7 @@ def render(out):
                   "| --- | --- | --- | --- | --- | --- | --- |"]
         for k in keys:
             st = summary[k]["metrics"][m]
-            cols = [fmt(st[c]) for c in ("median", "p95", "min", "max")] if st else ["n/a"] * 4
+            cols = [fmt_stat(st, c) for c in ("median", "p95", "min", "max")] if st else ["n/a"] * 4
             lines.append(f"| {k[0]} | {k[1]} | {k[2]} | " + " | ".join(cols) + " |")
         lines.append("")
 

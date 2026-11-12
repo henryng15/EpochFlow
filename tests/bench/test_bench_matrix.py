@@ -133,6 +133,23 @@ class SummarizeTest(unittest.TestCase):
         self.assertNotIn("| 1 | 1000 |", main.split("## Coverage")[1].split("## Correctness")[1])
         self.assertIn("| 2 | epochflow |", stress)
 
+    def test_count_medians_are_not_shown_as_measurements(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "raw.jsonl"), "w") as f:
+                for seed, retries in ((1, 2), (2, 3)):
+                    for mode in ("epochflow", "naive"):
+                        f.write(json.dumps(row(seed, mode, retries=retries)) + "\n")
+            with open(os.path.join(d, "environment.json"), "w") as f:
+                json.dump({"design": {"main": {"seeds": [1, 2], "cells": [[3, 200]]},
+                                      "stress": []}}, f)
+            report = bench_matrix.render(d)
+        retries = report.split("### Retries")[1].split("###")[0]
+        self.assertIn("| 3 | 200 | epochflow | 2.5 | 3 | 2 | 3 |", retries)
+        dedup = report.split("### Effects deduplicated")[1].split("###")[0]
+        self.assertIn("| 3 | 200 | epochflow | 0 | 0 | 0 | 0 |", dedup)
+        throughput = report.split("### Throughput")[1].split("###")[0]
+        self.assertIn("| 3 | 200 | epochflow | 10.00 | 10.00 | 10.00 | 10.00 |", throughput)
+
 
 if __name__ == "__main__":
     unittest.main()
