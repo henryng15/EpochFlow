@@ -35,6 +35,8 @@ constexpr const char* kUsage = R"(usage: epochflow-worker [flags]
   --worker-id=ID              identity shown in job records (default HOST-PID)
   --work-ms=N                 simulated processing time per job, spent before
                               its side effect (default 0)
+  --work-after-effect-ms=N    simulated processing after a side effect, before
+                              reporting (default 0)
   --provider-log=PATH         file used as the simulated external provider
                               (required for task=external jobs)
   --fault=NAME                inject one failure, once per process:
@@ -145,7 +147,7 @@ int main(int argc, char** argv) {
   try {
     const Flags flags(argc, argv,
                       {"coordinator", "worker-id", "work-ms", "rpc-timeout-ms", "idle-backoff-ms",
-                       "provider-log", "fault", "help"});
+                       "provider-log", "fault", "work-after-effect-ms", "help"});
     if (flags.Has("help") || !flags.positional().empty()) {
       std::cout << kUsage;
       return flags.Has("help") ? 0 : 2;
@@ -179,6 +181,11 @@ int main(int argc, char** argv) {
 
     TaskOptions task_options;
     task_options.work = work;
+    task_options.work_after_effect =
+        std::chrono::milliseconds{flags.GetInt("work-after-effect-ms", 0)};
+    if (task_options.work_after_effect.count() < 0) {
+      throw std::invalid_argument("--work-after-effect-ms must be >= 0");
+    }
     task_options.provider = provider.get();
     task_options.hooks.before_effect = at("pause-before-effect", SIGSTOP);
     task_options.hooks.after_effect = at("crash-after-effect", SIGKILL);

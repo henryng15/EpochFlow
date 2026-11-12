@@ -42,6 +42,9 @@ std::optional<Charge> ParseCharge(const std::map<std::string, std::string>& p, c
   Charge c;
   c.operation_id = op != p.end() && !op->second.empty() ? op->second
                                                         : std::format("job-{}", a.job_id);
+  if (const auto idem = p.find("idempotency"); idem != p.end() && idem->second == "off") {
+    c.operation_id += std::format("-attempt-{}", a.attempt);
+  }
   c.entry = LedgerEntry{account->second, *cents};
   c.request = std::format("account={};amount_cents={}", account->second, *cents);
   return c;
@@ -60,19 +63,23 @@ void Run(const std::function<void(const Assignment&)>& hook, const Assignment& a
   if (hook) hook(a);
 }
 
+// Spends `work`; false if the lease was lost meanwhile.
+bool SimulateWork(std::chrono::milliseconds work, std::stop_token lease_lost);
+
 HandlerResult Payment(WorkSource& source, const TaskOptions& options, const Assignment& a,
-                      const Charge& c) {
+                      const Charge& c, std::stop_token lease_lost) {
   Run(options.hooks.before_effect, a);
   const OperationOutcome o = source.ApplyLedger(a.job_id, a.generation, c.operation_id, c.entry);
   if (o.status == CommitStatus::kConflict) return Conflict(c.operation_id);
   if (o.status != CommitStatus::kAccepted) return NotCurrent(o.status);
   Run(options.hooks.after_effect, a);
+  if (!SimulateWork(options.work_after_effect, lease_lost)) return JobFailed{"lease lost", true};
   return JobSucceeded{std::format("ledger_entry={}{}", o.result,
                                   o.deduplicated ? ";deduplicated=true" : "")};
 }
 
 HandlerResult External(WorkSource& source, const TaskOptions& options, const Assignment& a,
-                       const Charge& c) {
+                       const Charge& c, std::stop_token lease_lost) {
   if (options.provider == nullptr) {
     return JobFailed{"no external provider configured on this worker", false};
   }
@@ -109,10 +116,10 @@ HandlerResult External(WorkSource& source, const TaskOptions& options, const Ass
       std::this_thread::sleep_for(std::chrono::milliseconds{50});
     }
   }
+  if (!SimulateWork(options.work_after_effect, lease_lost)) return JobFailed{"lease lost", true};
   return JobSucceeded{std::format("charge={}", confirmation)};
 }
 
-// Spends `work`; false if the lease was lost meanwhile.
 bool SimulateWork(std::chrono::milliseconds work, std::stop_token lease_lost) {
   const auto deadline = std::chrono::steady_clock::now() + work;
   while (std::chrono::steady_clock::now() < deadline) {
@@ -149,8 +156,8 @@ JobHandler MakeTaskHandler(WorkSource& source, TaskOptions options) {
     std::string error;
     const auto charge = ParseCharge(payload, a, error);
     if (!charge) return JobFailed{error, false};
-    return task->second == "payment" ? Payment(source, options, a, *charge)
-                                     : External(source, options, a, *charge);
+    return task->second == "payment" ? Payment(source, options, a, *charge, lease_lost)
+                                     : External(source, options, a, *charge, lease_lost);
   };
 }
 

@@ -172,6 +172,40 @@ TEST_F(TasksTest, PayloadWithoutTaskIsEchoed) {
   EXPECT_EQ(As<JobSucceeded>(RunNext()).result, "processed:hello");
 }
 
+TEST_F(TasksTest, PaymentWithIdempotencyOffDuplicatesOnRerun) {
+  // The naive baseline: a fresh operation id per attempt, as a client without
+  // idempotency keys would produce.
+  store_.Submit({"task=payment;op=order-1;account=alice;amount_cents=500;idempotency=off", 3});
+  EXPECT_EQ(As<JobSucceeded>(RunNext()).result, "ledger_entry=1");
+  ExpireAndReclaim();
+  EXPECT_EQ(As<JobSucceeded>(RunNext()).result, "ledger_entry=2");  // a second, real entry
+}
+
+TEST_F(TasksTest, WorkAfterEffectHappensAfterTheEffect) {
+  store_.Submit({"task=payment;op=order-1;account=alice;amount_cents=500", 3});
+  TaskOptions options;
+  options.work_after_effect = std::chrono::milliseconds{40};
+  std::chrono::steady_clock::time_point effect_done;
+  options.hooks.after_effect = [&](const Assignment&) {
+    effect_done = std::chrono::steady_clock::now();
+  };
+  const auto result = RunNext(options);
+  EXPECT_GE(std::chrono::steady_clock::now() - effect_done, std::chrono::milliseconds{40});
+  EXPECT_EQ(As<JobSucceeded>(result).result, "ledger_entry=1");
+}
+
+TEST_F(TasksTest, LeaseLostDuringWorkAfterEffectAbandonsTheReport) {
+  store_.Submit({"task=payment;op=order-1;account=alice;amount_cents=500", 3});
+  TaskOptions options;
+  options.work_after_effect = std::chrono::milliseconds{1000};
+  std::stop_source lost;
+  options.hooks.after_effect = [&](const Assignment&) { lost.request_stop(); };
+  const auto a = store_.Acquire("w", kLease);
+  const auto result = MakeTaskHandler(source_, options)(*a, lost.get_token());
+  // The effect stays applied; a later attempt deduplicates it.
+  EXPECT_TRUE(As<JobFailed>(result).retryable);
+}
+
 TEST(FileProvider, AppendsOneLinePerChargeAndCanTimeOutAfterCharging) {
   const auto path = std::filesystem::temp_directory_path() /
                     ("epochflow_provider_test_" + std::to_string(::getpid()) + ".log");
