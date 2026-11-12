@@ -12,6 +12,8 @@ add_executable(epochflow_unit_tests
   unit/in_memory_job_store_test.cpp
   unit/lease_keeper_test.cpp
   unit/local_runner_test.cpp
+  unit/reclaimer_test.cpp
+  unit/worker_test.cpp
   contract/job_store_contract.cpp
 )
 target_include_directories(epochflow_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -27,7 +27,6 @@ RunnerOptions FastOptions() {
   RunnerOptions options;
   options.workers = 4;
   options.lease = milliseconds{200};
-  options.renew_interval = milliseconds{40};
   options.idle_backoff = milliseconds{5};
   options.reclaim_interval = milliseconds{20};
   return options;
@@ -192,9 +191,9 @@ TEST_F(LocalRunnerTest, RejectsInvalidOptions) {
   no_workers.workers = 0;
   EXPECT_THROW(LocalRunner(store_, handler, no_workers), std::invalid_argument);
 
-  RunnerOptions slow_renewal = FastOptions();
-  slow_renewal.renew_interval = slow_renewal.lease;
-  EXPECT_THROW(LocalRunner(store_, handler, slow_renewal), std::invalid_argument);
+  RunnerOptions no_lease = FastOptions();
+  no_lease.lease = milliseconds{0};
+  EXPECT_THROW(LocalRunner(store_, handler, no_lease), std::invalid_argument);
 }
 
 }  // namespace
