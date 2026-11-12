@@ -60,8 +60,10 @@ def chaos_schedule(args, rng):
 
 class Chaos(threading.Thread):
     """Replays a chaos schedule until stopped. An event is skipped (and still
-    consumed) if its worker is paused or is the only active one, so one worker
-    always makes progress."""
+    consumed) if its worker is already paused. Every worker may be down at
+    once for a moment; killed workers restart immediately and paused ones
+    resume after 1.5 leases, so progress always resumes (and a single-worker
+    run still sees chaos)."""
 
     def __init__(self, cluster, args, schedule):
         super().__init__(daemon=True)
@@ -81,8 +83,7 @@ class Chaos(threading.Thread):
                 return
             with self.lock:
                 self.resume_due()
-                active = [n for n in self.cluster.processes if n not in self.paused]
-                if name not in active or len(active) <= 1:
+                if name in self.paused or name not in self.cluster.processes:
                     continue
                 proc = self.cluster.processes[name]
                 self.events.append((time.time(), name, action))
@@ -183,6 +184,7 @@ def measure(c, mode, started, events):
         "recovery_p50_s": round(statistics.median(recoveries), 2) if recoveries else None,
         "recovery_p95_s": round(percentile(recoveries, 95), 2) if recoveries else None,
         "recovery_max_s": round(max(recoveries), 2) if recoveries else None,
+        "recovery_samples_s": [round(r, 3) for r in recoveries],
         "stale_requests_rejected": stale,
         "effects_deduplicated": deduplicated,
         "ledger_entries": entries,
@@ -226,7 +228,7 @@ def print_table(results):
         print(f"| {label} | " + " | ".join(cell(r, key) for r in results) + " |")
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bin", required=True, help="directory with the EpochFlow binaries")
     p.add_argument("--dsn", required=True, help="PostgreSQL connection string")
@@ -245,7 +247,11 @@ def main():
     p.add_argument("--check", action="store_true",
                    help="exit 1 unless the epochflow run has every job completed, no duplicate "
                         "entries, no overcharge, and no invariant violations")
-    args = p.parse_args()
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
 
     modes = ["epochflow", "naive"] if args.mode == "compare" else [args.mode]
     results = [run(args, mode, args.seed) for mode in modes]

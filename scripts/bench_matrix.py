@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Seeded benchmark matrix: scripts/bench.py over many seeds, worker counts,
+and job counts, with raw per-run output and an aggregate report.
+
+Every matrix cell (workers x jobs) runs each seed in both modes back to back,
+so each EpochFlow/naive pair replays the same job set and chaos schedule.
+
+  run        execute the runs not yet recorded in OUT/raw.jsonl (resumable;
+             failed runs are retried), recording OUT/environment.json
+  aggregate  write OUT/summary.md from OUT/raw.jsonl
+
+Example (the Phase 2 matrix, about four hours on WSL2):
+  scripts/bench_matrix.py run --bin build/bin --dsn "$(scripts/test-db.sh dsn)" \\
+      --out docs/benchmarks/phase-2 --seeds 1-20 --workers 1,3,6 --jobs 200,1000
+  scripts/bench_matrix.py aggregate --out docs/benchmarks/phase-2
+
+Standard library only; see docs/testing.md.
+"""
+
+import argparse
+import copy
+import datetime
+import json
+import os
+import platform
+import statistics
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bench  # noqa: E402
+
+MODES = ("epochflow", "naive")
+
+# Per-run metrics summarized across the runs of a cell (key, label).
+METRICS = [
+    ("throughput_jobs_per_s", "Throughput (jobs/s)"),
+    ("recovery_latency_s", "Recovery latency (s), all events pooled"),
+    ("retries", "Retries"),
+    ("stale_requests_rejected", "Stale requests rejected by fencing"),
+    ("effects_deduplicated", "Effects deduplicated"),
+    ("duplicate_ledger_entries", "Duplicate ledger entries"),
+    ("overcharged_cents", "Overcharged (cents)"),
+    ("invariant_violations", "Invariant violations"),
+    ("incomplete_jobs", "Incomplete jobs"),
+]
+
+# Settings shared by every run, recorded with the results.
+SETTINGS = ("lease_ms", "reclaim_ms", "work_ms", "work_after_effect_ms", "chaos_interval_ms",
+            "kill_ratio", "timeout_s")
+
+MIN_AVAILABLE_KIB = 1024 * 1024  # do not start a run with less than 1 GiB free
+
+
+def plan(seeds, workers, jobs):
+    """Every (seed, workers, jobs, mode), one seed at a time, pairs adjacent."""
+    return [(s, w, j, m) for s in seeds for w in workers for j in jobs for m in MODES]
+
+
+def run_key(row):
+    return (row["seed"], row["workers"], row["jobs"], row["mode"])
+
+
+def pending(planned, done):
+    """Planned runs without a successful row; failed runs are tried again."""
+    succeeded = {run_key(r) for r in done if "error" not in r}
+    return [p for p in planned if p not in succeeded]
+
+
+def stats(values):
+    if not values:
+        return None
+    return {"median": statistics.median(values), "p95": bench.percentile(values, 95),
+            "min": min(values), "max": max(values)}
+
+
+def summarize(rows):
+    """{(workers, jobs, mode): {"runs", "failed_runs", "runs_with_duplicates",
+    "metrics": {metric: stats}}}. The last successful row of a run wins; a run
+    counts as failed only if it never succeeded."""
+    succeeded, failed = {}, set()
+    for r in rows:
+        if "error" in r:
+            failed.add(run_key(r))
+        else:
+            succeeded[run_key(r)] = r
+    failed -= set(succeeded)
+
+    cells = {}
+    for (seed, workers, jobs, mode), r in sorted(succeeded.items()):
+        cell = cells.setdefault((workers, jobs, mode), {"rows": []})
+        cell["rows"].append(r)
+    for (seed, workers, jobs, mode) in failed:
+        cells.setdefault((workers, jobs, mode), {"rows": []})
+
+    summary = {}
+    for key, cell in cells.items():
+        runs = cell["rows"]
+        values = {m: [] for m, _ in METRICS}
+        for r in runs:
+            for m, _ in METRICS:
+                if m == "recovery_latency_s":
+                    values[m].extend(r.get("recovery_samples_s", []))
+                elif m == "incomplete_jobs":
+                    values[m].append(r["jobs"] - r["jobs_completed"])
+                elif r.get(m) is not None:
+                    values[m].append(r[m])
+        summary[key] = {
+            "runs": len(runs),
+            "failed_runs": sum(1 for f in failed if (f[1], f[2], f[3]) == key),
+            "runs_with_duplicates": sum(1 for r in runs if r["duplicate_ledger_entries"] > 0),
+            "metrics": {m: stats(v) for m, v in values.items()},
+        }
+    return summary
+
+
+def fmt(value):
+    if value is None:
+        return "n/a"
+    if isinstance(value, float) and not value.is_integer():
+        return f"{value:.2f}"
+    return str(int(value))
+
+
+def load_rows(path):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def render(out):
+    rows = load_rows(os.path.join(out, "raw.jsonl"))
+    with open(os.path.join(out, "environment.json")) as f:
+        env = json.load(f)
+    summary = summarize(rows)
+    keys = sorted(summary, key=lambda k: (k[0], k[1], MODES.index(k[2])))
+
+    lines = ["# Benchmark matrix", "",
+             "Generated by `scripts/bench_matrix.py aggregate` from `raw.jsonl` (one JSON "
+             "object per run). Each cell runs every seed in both modes with the same job set "
+             "and chaos schedule. These numbers describe this machine only.", "",
+             "## Environment", "",
+             f"- Command: `{env.get('command')}`",
+             f"- Git commit: `{env.get('git')}`",
+             f"- OS: {env.get('os')}",
+             f"- CPU: {env.get('cpu')}",
+             f"- Memory: {env.get('memory')}",
+             f"- PostgreSQL: {env.get('postgres')}",
+             f"- Seeds: {env.get('seeds')}; workers: {env.get('workers')}; jobs: {env.get('jobs')}",
+             f"- Settings: {', '.join(f'{k}={v}' for k, v in env.get('settings', {}).items())}",
+             "",
+             "## Correctness", "",
+             "| Workers | Jobs | Mode | Runs | Failed runs | Runs with duplicates | "
+             "Duplicate entries (max) | Overcharged cents (max) | Invariant violations (max) | "
+             "Incomplete jobs (max) |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for k in keys:
+        s = summary[k]
+        mx = lambda m: fmt(s["metrics"][m]["max"]) if s["metrics"][m] else "n/a"  # noqa: E731
+        lines.append(f"| {k[0]} | {k[1]} | {k[2]} | {s['runs']} | {s['failed_runs']} | "
+                     f"{s['runs_with_duplicates']} | {mx('duplicate_ledger_entries')} | "
+                     f"{mx('overcharged_cents')} | {mx('invariant_violations')} | "
+                     f"{mx('incomplete_jobs')} |")
+    lines += ["", "## Statistics per metric", "",
+              "Median (= p50), p95 (nearest rank), minimum, and maximum over the runs of each "
+              "cell. Recovery latency pools every chaos event of every run: the time from the "
+              "event to the next attempt of each job the affected worker held.", ""]
+    for m, label in METRICS:
+        lines += [f"### {label}", "", "| Workers | Jobs | Mode | Median | p95 | Min | Max |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for k in keys:
+            st = summary[k]["metrics"][m]
+            cols = [fmt(st[c]) for c in ("median", "p95", "min", "max")] if st else ["n/a"] * 4
+            lines.append(f"| {k[0]} | {k[1]} | {k[2]} | " + " | ".join(cols) + " |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def parse_list(text):
+    out = []
+    for part in text.split(","):
+        lo, _, hi = part.partition("-")
+        out.extend(range(int(lo), int(hi) + 1) if hi else [int(lo)])
+    return out
+
+
+def proc_field(path, name):
+    """First "name: value" field of a /proc file, or None."""
+    with open(path) as f:
+        for line in f:
+            if line.startswith(name):
+                return line.split(":", 1)[1].strip()
+    return None
+
+
+def available_kib():
+    value = proc_field("/proc/meminfo", "MemAvailable")
+    return int(value.split()[0]) if value else MIN_AVAILABLE_KIB
+
+
+def wait_for_memory():
+    for _ in range(20):
+        if available_kib() >= MIN_AVAILABLE_KIB:
+            return
+        print("waiting for memory (MemAvailable below 1 GiB)", flush=True)
+        time.sleep(30)
+    raise SystemExit("not enough free memory to continue; rerun to resume")
+
+
+def environment(a, settings):
+    def sh(*cmd):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip()
+        except OSError:
+            return "unknown"
+    cpu = proc_field("/proc/cpuinfo", "model name") or platform.processor()
+    mem_kib = int(proc_field("/proc/meminfo", "MemTotal").split()[0])
+    dirty = " (with uncommitted changes)" if sh("git", "status", "--porcelain") else ""
+    command = " ".join(["scripts/bench_matrix.py"] +
+                       [('--dsn="$(scripts/test-db.sh dsn)"' if x.startswith("--dsn=") else x)
+                        for x in _redacted_argv()])
+    return {
+        "command": command,
+        "git": sh("git", "rev-parse", "--short", "HEAD") + dirty,
+        "os": platform.platform(),
+        "cpu": f"{cpu}, {os.cpu_count()} logical CPUs",
+        "memory": f"{mem_kib // 1024} MiB",
+        "postgres": sh("psql", a.dsn, "-X", "-tAc", "SHOW server_version"),
+        "python": platform.python_version(),
+        "seeds": a.seeds, "workers": a.workers, "jobs": a.jobs,
+        "settings": settings,
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def _redacted_argv():
+    argv, out, skip = sys.argv[1:], [], False
+    for i, x in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if x == "--dsn":
+            out.append('--dsn="$(scripts/test-db.sh dsn)"')
+            skip = True
+        else:
+            out.append(x)
+    return out
+
+
+def cmd_run(a):
+    os.makedirs(a.out, exist_ok=True)
+    raw = os.path.join(a.out, "raw.jsonl")
+    base = bench.build_parser().parse_args(
+        ["--bin", a.bin, "--dsn", a.dsn, "--timeout-s", str(a.timeout_s)])
+    settings = {k: getattr(base, k) for k in SETTINGS}
+    env_path = os.path.join(a.out, "environment.json")
+    if not os.path.exists(env_path):
+        with open(env_path, "w") as f:
+            json.dump(environment(a, settings), f, indent=2)
+
+    todo = pending(plan(a.seeds, a.workers, a.jobs), load_rows(raw))
+    print(f"{len(todo)} runs to go", flush=True)
+    for i, (seed, workers, jobs, mode) in enumerate(todo, 1):
+        wait_for_memory()
+        args = copy.copy(base)
+        args.workers, args.jobs = workers, jobs
+        started = time.monotonic()
+        try:
+            result = bench.run(args, mode, seed)
+        except Exception as e:  # recorded and retried on the next resume
+            result = {"error": str(e).splitlines()[0][:500]}
+        row = {"seed": seed, "workers": workers, "jobs": jobs, **result, "mode": mode,
+               "wall_s": round(time.monotonic() - started, 1)}
+        with open(raw, "a") as f:
+            f.write(json.dumps(row) + "\n")
+        brief = row.get("error") or (f"throughput={row['throughput_jobs_per_s']} "
+                                     f"duplicates={row['duplicate_ledger_entries']} "
+                                     f"violations={row['invariant_violations']}")
+        print(f"[{i}/{len(todo)}] seed={seed} workers={workers} jobs={jobs} mode={mode} "
+              f"{row['wall_s']}s {brief}", flush=True)
+    return 0
+
+
+def cmd_aggregate(a):
+    path = os.path.join(a.out, "summary.md")
+    with open(path, "w") as f:
+        f.write(render(a.out) + "\n")
+    print(f"wrote {path}")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--bin", required=True)
+    r.add_argument("--dsn", required=True)
+    r.add_argument("--out", required=True)
+    r.add_argument("--seeds", type=parse_list, default=parse_list("1-20"))
+    r.add_argument("--workers", type=parse_list, default=parse_list("1,3,6"))
+    r.add_argument("--jobs", type=parse_list, default=parse_list("200,1000"))
+    r.add_argument("--timeout-s", type=int, default=900)
+    ag = sub.add_parser("aggregate")
+    ag.add_argument("--out", required=True)
+    a = p.parse_args()
+    return cmd_run(a) if a.command == "run" else cmd_aggregate(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

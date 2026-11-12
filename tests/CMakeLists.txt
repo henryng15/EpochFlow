@@ -73,3 +73,12 @@ set_tests_properties(faults PROPERTIES
 add_test(NAME bench.smoke
   COMMAND sh -c "[ -n \"$EPOCHFLOW_DSN\" ] || exit 77; exec python3 '${PROJECT_SOURCE_DIR}/scripts/bench.py' --bin '${PROJECT_BINARY_DIR}/bin' --dsn \"$EPOCHFLOW_DSN\" --mode compare --jobs 60 --chaos-interval-ms 300 --check")
 set_tests_properties(bench.smoke PROPERTIES LABELS "bench;db" TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# Benchmark matrix: plan, resume, and aggregation logic (no database), then a
+# one-seed matrix end to end. Labels "bench" (and "db" for the end-to-end run).
+add_test(NAME bench.matrix_logic
+  COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/bench/test_bench_matrix.py")
+set_tests_properties(bench.matrix_logic PROPERTIES LABELS "bench")
+add_test(NAME bench.matrix_smoke
+  COMMAND sh -c "[ -n \"$EPOCHFLOW_DSN\" ] || exit 77; out='${CMAKE_CURRENT_BINARY_DIR}/bench-matrix-smoke'; rm -rf \"$out\" && python3 '${PROJECT_SOURCE_DIR}/scripts/bench_matrix.py' run --bin '${PROJECT_BINARY_DIR}/bin' --dsn \"$EPOCHFLOW_DSN\" --out \"$out\" --seeds 1 --workers 2 --jobs 30 && python3 '${PROJECT_SOURCE_DIR}/scripts/bench_matrix.py' aggregate --out \"$out\" && grep -q '| 2 | 30 | epochflow | 1 | 0 | 0 |' \"$out/summary.md\"")
+set_tests_properties(bench.matrix_smoke PROPERTIES LABELS "bench;db" TIMEOUT 300 SKIP_RETURN_CODE 77)
