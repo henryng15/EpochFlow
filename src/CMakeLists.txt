@@ -11,3 +11,13 @@ add_library(epochflow STATIC
 )
 target_include_directories(epochflow PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(epochflow PUBLIC Threads::Threads)
+
+# gRPC layer: coordinator server, client, and protocol conversion. Kept apart
+# from the core library so core code and its unit tests do not depend on gRPC.
+add_library(epochflow_rpc STATIC
+  client/coordinator_client.cpp
+  coordinator/coordinator.cpp
+  coordinator/coordinator_service.cpp
+  rpc/convert.cpp
+)
+target_link_libraries(epochflow_rpc PUBLIC epochflow epochflow_proto)

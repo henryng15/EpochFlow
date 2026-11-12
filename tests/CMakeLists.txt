@@ -29,3 +29,13 @@ add_executable(epochflow_integration_tests
 target_link_libraries(epochflow_integration_tests PRIVATE
   PkgConfig::PQXX GTest::gtest_main)
 gtest_discover_tests(epochflow_integration_tests PROPERTIES LABELS db)
+
+# gRPC tests: coordinator, client, and workers over loopback. No external
+# services. CTest label "grpc".
+add_executable(epochflow_grpc_tests
+  grpc/coordinator_grpc_test.cpp
+  grpc/distributed_test.cpp
+)
+target_include_directories(epochflow_grpc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(epochflow_grpc_tests PRIVATE epochflow_rpc GTest::gtest_main)
+gtest_discover_tests(epochflow_grpc_tests PROPERTIES LABELS grpc)
