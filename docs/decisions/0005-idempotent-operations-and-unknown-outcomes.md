@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-11-12).
+Accepted (2026-11-12). Amended by [ADR 0006](0006-operation-level-reconciliation.md): reconciliation also resolves the external operation.
 
 ## Context
 
