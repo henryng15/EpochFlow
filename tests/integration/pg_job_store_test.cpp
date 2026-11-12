@@ -5,7 +5,10 @@
 #include "contract/job_store_contract.h"
 #include "store/migrations.h"
 #include "store/pg_job_store.h"
+#include "support/forwarding_job_store.h"
 #include "support/pg_test_schema.h"
+#include "worker/tasks.h"
+#include "worker/work_source.h"
 
 #include <gtest/gtest.h>
 #include <pqxx/pqxx>
@@ -13,6 +16,7 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -305,6 +309,61 @@ TEST_F(PgJobStoreTest, InvariantCheckerReportsInjectedViolations) {
   EXPECT_TRUE(has("I3 one deciding attempt|job " + std::to_string(id)));
   EXPECT_TRUE(has("I3 outcome from current generation|job " + std::to_string(id)));
   EXPECT_TRUE(has("I4 ledger operation has entry|operation orphan"));
+}
+
+// The confirmation write never reaches PostgreSQL, as when every
+// ConfirmExternalOperation RPC times out.
+class UnreachableConfirmations final : public ForwardingJobStore {
+ public:
+  using ForwardingJobStore::ForwardingJobStore;
+  CommitStatus ConfirmExternal(const std::string&, const std::string&,
+                               const std::string&) override {
+    throw std::runtime_error("UNAVAILABLE: coordinator unreachable");
+  }
+};
+
+class OneChargeProvider final : public ExternalProvider {
+ public:
+  int charges = 0;
+  std::string Charge(const std::string&, const std::string&) override {
+    return "ch_" + std::to_string(++charges);
+  }
+};
+
+TEST_F(PgJobStoreTest, UnrecordedConfirmationLeavesTheJobUnknownNotCompleted) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  UnreachableConfirmations lossy{store};
+  StoreWorkSource source{lossy, seconds{30}};
+  OneChargeProvider provider;
+  TaskOptions options;
+  options.provider = &provider;
+
+  const JobId id = store.Submit({"task=external;op=charge-1;account=a;amount_cents=5", 3});
+  const auto a = store.Acquire("w", seconds{30});
+  const HandlerResult result = MakeTaskHandler(source, options)(*a, std::stop_token{});
+  ASSERT_TRUE(std::holds_alternative<JobUnknown>(result));
+  // What the worker does with that result.
+  ASSERT_EQ(store.MarkUnknown(id, a->generation, std::get<JobUnknown>(result).reason),
+            CommitStatus::kAccepted);
+
+  EXPECT_EQ(provider.charges, 1);
+  EXPECT_EQ(store.Get(id)->state, JobState::kUnknown);
+  EXPECT_EQ(InvariantViolations(Dsn()), std::vector<std::string>{});
+}
+
+TEST_F(PgJobStoreTest, InvariantCheckerReportsCompletionWithUnconfirmedExternalOperation) {
+  MigrateDatabase(Dsn());
+  PgJobStore store{Dsn()};
+  // What a worker that ignores its confirmation result (Version 1) produced.
+  const JobId id = store.Submit({"a", 3});
+  const auto a = store.Acquire("w", seconds{30});
+  store.BeginExternal(id, a->generation, "charge-1", "req");
+  store.Complete(id, a->generation, "charge=ch_1");
+
+  EXPECT_EQ(InvariantViolations(Dsn()),
+            std::vector<std::string>{"I8 completed job has unresolved external operation|job " +
+                                     std::to_string(id) + "|operation charge-1 is STARTED"});
 }
 
 }  // namespace

@@ -50,6 +50,9 @@ constexpr const char* kUsage = R"(usage: epochflow-worker [flags]
                                 drop-report-ack      lose the first report's
                                                      acknowledgement
                                 external-timeout     provider charges, then times out
+                                lose-confirm         provider charges, but no
+                                                     confirmation reaches the
+                                                     coordinator
   --rpc-timeout-ms=N          deadline per RPC (default 5000)
   --idle-backoff-ms=N         wait when no job is available (default 200)
   --help
@@ -59,7 +62,8 @@ Logs events to stderr.
 )";
 
 constexpr const char* kFaults[] = {"crash-before-work",   "crash-after-effect", "pause-before-effect",
-                                   "pause-before-report", "drop-report-ack",    "external-timeout"};
+                                   "pause-before-report", "drop-report-ack",    "external-timeout",
+                                   "lose-confirm"};
 
 // Raises `signal` the first time Fire is called, after logging the job and
 // generation, so tests can see the process reach the fault point. Later calls
@@ -86,11 +90,15 @@ class FaultPoint {
   std::atomic<bool> fired_{false};
 };
 
-// Loses the acknowledgement of the first successful Complete: the coordinator
-// applies it, the worker sees an error and retries.
-class DropFirstReportAck final : public epochflow::WorkSource {
+// Injects message loss between the worker and the coordinator:
+//   kFirstReportAck: the coordinator applies the first successful Complete,
+//                    but its acknowledgement is lost; the worker retries.
+//   kEveryConfirm:   no ConfirmExternalOperation ever reaches the coordinator,
+//                    as if each one timed out.
+class LossyWorkSource final : public epochflow::WorkSource {
  public:
-  explicit DropFirstReportAck(epochflow::WorkSource& inner) : inner_(inner) {}
+  enum class Loss { kNone, kFirstReportAck, kEveryConfirm };
+  LossyWorkSource(epochflow::WorkSource& inner, Loss loss) : inner_(inner), loss_(loss) {}
   std::optional<epochflow::Assignment> Acquire(const epochflow::WorkerId& w) override {
     return inner_.Acquire(w);
   }
@@ -100,7 +108,8 @@ class DropFirstReportAck final : public epochflow::WorkSource {
   epochflow::CommitStatus Complete(epochflow::JobId id, epochflow::Generation g,
                                    const std::string& r) override {
     const auto status = inner_.Complete(id, g, r);
-    if (status == epochflow::CommitStatus::kAccepted && !dropped_.exchange(true)) {
+    if (loss_ == Loss::kFirstReportAck && status == epochflow::CommitStatus::kAccepted &&
+        !dropped_.exchange(true)) {
       epochflow::LogToStderr(std::format("fault=drop-report-ack firing job={} generation={}", id, g));
       throw std::runtime_error("acknowledgement lost (injected)");
     }
@@ -125,11 +134,18 @@ class DropFirstReportAck final : public epochflow::WorkSource {
   }
   epochflow::CommitStatus ConfirmExternal(const std::string& op, const std::string& req,
                                           const std::string& conf) override {
+    if (loss_ == Loss::kEveryConfirm) {
+      if (!dropped_.exchange(true)) {
+        epochflow::LogToStderr(std::format("fault=lose-confirm firing operation={}", op));
+      }
+      throw std::runtime_error("confirmation lost (injected)");
+    }
     return inner_.ConfirmExternal(op, req, conf);
   }
 
  private:
   epochflow::WorkSource& inner_;
+  Loss loss_;
   std::atomic<bool> dropped_{false};
 };
 
@@ -164,8 +180,11 @@ int main(int argc, char** argv) {
     ClientOptions client_options;
     client_options.rpc_timeout = Duration{flags.GetInt("rpc-timeout-ms", 5000)};
     CoordinatorClient client(flags.GetString("coordinator", "127.0.0.1:50051"), client_options);
-    DropFirstReportAck lossy(client);
-    WorkSource& source = fault == "drop-report-ack" ? static_cast<WorkSource&>(lossy) : client;
+    using Loss = LossyWorkSource::Loss;
+    LossyWorkSource lossy(client, fault == "drop-report-ack" ? Loss::kFirstReportAck
+                                  : fault == "lose-confirm"  ? Loss::kEveryConfirm
+                                                             : Loss::kNone);
+    WorkSource& source = lossy;
 
     std::unique_ptr<FileProvider> provider;
     if (flags.Has("provider-log")) {

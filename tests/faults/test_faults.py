@@ -196,6 +196,18 @@ class FaultScenarios(unittest.TestCase):
         self.assertEqual((j["state"], j["result"]), ("COMPLETED", confirmation))
 
     @with_cluster
+    def test_lost_confirmation_is_unknown_not_completed(self, c):
+        c.start_coordinator()
+        [job] = c.submit(external("charge-3"))
+        c.start_worker("w1", fault="lose-confirm")
+        c.wait_states([job], {"UNKNOWN"})
+        j = c.job(job)
+        self.assertEqual((j["attempts"], j["generation"]), ("1", "1"))
+        self.assertIn("not recorded", j["error"])
+        self.assertEqual(len(c.provider_charges("charge-3")), 1)  # charged exactly once
+        self.assertIn("fault=lose-confirm firing operation=charge-3", c.log("w1"))
+
+    @with_cluster
     def test_crash_during_external_call_is_never_charged_twice(self, c):
         c.start_coordinator()
         [job] = c.submit(external("charge-2"))
