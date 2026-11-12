@@ -1,5 +1,6 @@
 # Core library shared by the runner, coordinator, worker, and tests.
 add_library(epochflow STATIC
+  core/job.cpp
   core/job_state.cpp
 )
 target_include_directories(epochflow PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
