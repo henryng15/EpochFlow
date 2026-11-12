@@ -3,6 +3,7 @@
 
 #include "worker/tasks.h"
 #include "store/in_memory_job_store.h"
+#include "support/forwarding_job_store.h"
 #include "support/manual_clock.h"
 #include "worker/work_source.h"
 
@@ -38,6 +39,37 @@ class FakeProvider final : public ExternalProvider {
   }
 };
 
+// Scripts ConfirmExternal: each call takes the next step; once the script is
+// used up, calls go straight to the store.
+class ScriptedConfirmStore final : public ForwardingJobStore {
+ public:
+  enum class Step {
+    kThrow,            // transport failure; the store never saw the call
+    kApplyThenThrow,   // the store applied it, but the acknowledgement was lost
+    kConflict,         // the store answered kConflict
+  };
+  using ForwardingJobStore::ForwardingJobStore;
+
+  std::vector<Step> script;
+  int calls = 0;
+
+  CommitStatus ConfirmExternal(const std::string& op, const std::string& req,
+                               const std::string& conf) override {
+    const auto i = static_cast<std::size_t>(calls++);
+    if (i >= script.size()) return inner_.ConfirmExternal(op, req, conf);
+    switch (script[i]) {
+      case Step::kThrow:
+        throw std::runtime_error("UNAVAILABLE: connection reset");
+      case Step::kApplyThenThrow:
+        inner_.ConfirmExternal(op, req, conf);
+        throw std::runtime_error("DEADLINE_EXCEEDED: acknowledgement lost");
+      case Step::kConflict:
+        return CommitStatus::kConflict;
+    }
+    return CommitStatus::kConflict;
+  }
+};
+
 class TasksTest : public ::testing::Test {
  protected:
   // Acquires the next job and runs the task handler for it.
@@ -57,7 +89,8 @@ class TasksTest : public ::testing::Test {
 
   ManualClock clock_;
   InMemoryJobStore store_{clock_};
-  StoreWorkSource source_{store_, kLease};
+  ScriptedConfirmStore confirms_{store_};
+  StoreWorkSource source_{confirms_, kLease};
   FakeProvider provider_;
   Assignment last_;
 };
@@ -128,6 +161,73 @@ TEST_F(TasksTest, ExternalChargeHappensOnceAndIsConfirmed) {
   // A later attempt (crash after confirm, before report) reuses the answer.
   ExpireAndReclaim();
   EXPECT_EQ(As<JobSucceeded>(RunNext()).result, "charge=ch_1;reused=true");
+  EXPECT_EQ(provider_.charges.size(), 1u);
+}
+
+constexpr const char* kExternalJob = "task=external;op=charge-1;account=alice;amount_cents=500";
+constexpr const char* kExternalRequest = "account=alice;amount_cents=500";
+
+TEST_F(TasksTest, ExternalSuccessIsReportedOnlyAfterTheConfirmationIsRecorded) {
+  const JobId id = store_.Submit({kExternalJob, 3});
+  EXPECT_EQ(As<JobSucceeded>(RunNext()).result, "charge=ch_1");
+  EXPECT_EQ(confirms_.calls, 1);
+  // The durable record now holds the provider's answer.
+  const auto again = store_.BeginExternal(id, last_.generation, "charge-1", kExternalRequest);
+  EXPECT_EQ(again.state, ExternalState::kConfirmed);
+  EXPECT_EQ(again.result, "ch_1");
+}
+
+TEST_F(TasksTest, RejectedConfirmationMakesTheOutcomeUnknownWithoutCallingTheProviderAgain) {
+  const JobId id = store_.Submit({kExternalJob, 3});
+  confirms_.script = {ScriptedConfirmStore::Step::kConflict};
+  const auto unknown = As<JobUnknown>(RunNext());
+  EXPECT_NE(unknown.reason.find("charge-1"), std::string::npos);
+  EXPECT_NE(unknown.reason.find("rejected"), std::string::npos);
+  EXPECT_EQ(confirms_.calls, 1);  // a rejection is an answer: no retry
+  EXPECT_EQ(provider_.charges.size(), 1u);
+  // The intent is still unconfirmed, so a later attempt would see it in doubt.
+  EXPECT_EQ(store_.BeginExternal(id, last_.generation, "charge-1", kExternalRequest).state,
+            ExternalState::kStart);
+}
+
+TEST_F(TasksTest, ConfirmationThatNeverReachesTheStoreMakesTheOutcomeUnknown) {
+  const JobId id = store_.Submit({kExternalJob, 3});
+  using Step = ScriptedConfirmStore::Step;
+  confirms_.script = {Step::kThrow, Step::kThrow, Step::kThrow};
+  const auto unknown = As<JobUnknown>(RunNext());
+  EXPECT_NE(unknown.reason.find("not recorded"), std::string::npos);
+  EXPECT_EQ(confirms_.calls, 3);
+  EXPECT_EQ(provider_.charges.size(), 1u);
+  EXPECT_EQ(store_.BeginExternal(id, last_.generation, "charge-1", kExternalRequest).state,
+            ExternalState::kStart);  // still only an intent
+}
+
+TEST_F(TasksTest, LostConfirmationAcknowledgementIsRecognizedOnRetry) {
+  store_.Submit({kExternalJob, 3});
+  using Step = ScriptedConfirmStore::Step;
+  confirms_.script = {Step::kApplyThenThrow};
+  EXPECT_EQ(As<JobSucceeded>(RunNext()).result, "charge=ch_1");
+  EXPECT_EQ(confirms_.calls, 2);  // the retry finds the identical confirmation
+  EXPECT_EQ(provider_.charges.size(), 1u);
+}
+
+TEST_F(TasksTest, ConfirmationFromAStaleAttemptIsKeptButItsResultIsFenced) {
+  const JobId id = store_.Submit({kExternalJob, 3});
+  TaskOptions options;
+  Assignment newer;
+  // While the provider call is in flight the lease expires and another worker
+  // takes over.
+  options.hooks.after_effect = [&](const Assignment&) {
+    ExpireAndReclaim();
+    newer = *store_.Acquire("newer", kLease);
+  };
+  EXPECT_TRUE(std::holds_alternative<JobSucceeded>(RunNext(options)));
+  // The stale worker's report is rejected ...
+  EXPECT_EQ(store_.Complete(id, last_.generation, "charge=ch_1"), CommitStatus::kStale);
+  EXPECT_EQ(store_.Get(id)->state, JobState::kRunning);
+  // ... but the provider's answer it recorded lets the current attempt finish.
+  const auto begin = store_.BeginExternal(id, newer.generation, "charge-1", kExternalRequest);
+  EXPECT_EQ(begin.state, ExternalState::kConfirmed);
   EXPECT_EQ(provider_.charges.size(), 1u);
 }
 

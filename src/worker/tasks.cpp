@@ -106,13 +106,29 @@ HandlerResult External(WorkSource& source, const TaskOptions& options, const Ass
   }
   Run(options.hooks.after_effect, a);
 
-  // The charge happened; recording the confirmation lets later attempts reuse
-  // it. If recording fails, the job still succeeds with what the provider said.
-  for (int attempt = 0; attempt < 3; ++attempt) {
+  // The provider charged. Success may be reported only once the durable record
+  // holds that confirmation (invariant I8): otherwise the job could complete
+  // while its operation stays STARTED, and every later attempt would be left
+  // in doubt. Confirmation is idempotent for the same answer, so transport
+  // failures are retried; a lost acknowledgement comes back as kAccepted. Any
+  // other answer, or running out of tries, leaves the outcome UNKNOWN. The
+  // provider is never called again here.
+  constexpr int kConfirmTries = 3;
+  for (int attempt = 1;; ++attempt) {
     try {
-      source.ConfirmExternal(c.operation_id, c.request, confirmation);
-      break;
-    } catch (...) {
+      const CommitStatus s = source.ConfirmExternal(c.operation_id, c.request, confirmation);
+      if (s == CommitStatus::kAccepted) break;
+      return JobUnknown{std::format(
+          "provider charged operation {} ({}) but the confirmation was rejected ({}); "
+          "reconcile against the provider",
+          c.operation_id, confirmation, ToString(s))};
+    } catch (const std::exception& e) {
+      if (attempt == kConfirmTries) {
+        return JobUnknown{std::format(
+            "provider charged operation {} ({}) but the confirmation was not recorded after {} "
+            "tries: {}; reconcile against the provider",
+            c.operation_id, confirmation, kConfirmTries, e.what())};
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds{50});
     }
   }
