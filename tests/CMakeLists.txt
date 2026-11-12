@@ -58,3 +58,11 @@ set_tests_properties(e2e.smoke PROPERTIES LABELS e2e TIMEOUT 120)
 add_test(NAME e2e.restart
   COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/e2e/restart_test.sh ${PROJECT_BINARY_DIR}/bin)
 set_tests_properties(e2e.restart PROPERTIES LABELS "e2e;db" TIMEOUT 120 SKIP_RETURN_CODE 77)
+
+# Fault injection with real processes and PostgreSQL (Python standard library
+# unittest). Exits 77 (skipped) without EPOCHFLOW_DSN or psql. Labels "faults",
+# "db".
+add_test(NAME faults COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/faults/test_faults.py)
+set_tests_properties(faults PROPERTIES
+  LABELS "faults;db" TIMEOUT 300 SKIP_RETURN_CODE 77
+  ENVIRONMENT "EPOCHFLOW_BIN=${PROJECT_BINARY_DIR}/bin")
