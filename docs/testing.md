@@ -15,6 +15,12 @@ each layer must cover.
   loopback connection in one process. No external services.
 - **End-to-end tests** (CTest label `e2e`): real `epochflow-coordinator`,
   `epochflow-worker`, and `epochflowctl` processes driven by a shell script.
+- **Benchmark smoke test** (CTest labels `bench` and `db`): `scripts/bench.py
+  --mode compare --jobs 60 --check`; fails unless the EpochFlow run has every
+  job completed with no duplicate effect or invariant violation.
+- **Docker demo** (CI job `docker-demo`): builds the image and runs
+  `scripts/demo-docker.sh`, which kills and freezes worker containers and runs
+  the invariant checker.
 - **Fault-injection tests** (CTest labels `faults` and `db`): real processes
   and PostgreSQL; one failure injected per scenario, then the SQL invariant
   checker.
@@ -163,6 +169,8 @@ cannot pass silently.
 | `tests/grpc/` | gRPC tests, binary `epochflow_grpc_tests` |
 | `tests/e2e/` | Process-level tests (`e2e.smoke`, `e2e.restart`) |
 | `tests/faults/` | Fault-injection scenarios (`faults`) |
+| `scripts/epochflow_cluster.py` | Process control shared by the fault scenarios and the benchmark |
+| `scripts/bench.py`, `scripts/demo-docker.sh` | Benchmark (`bench.smoke`) and Docker demo |
 | `scripts/check-invariants.sql` | Invariant checker used by tests and operators |
 | `tests/integration/` | Database tests (contract on PostgreSQL, storage), binary `epochflow_integration_tests` |
 | `docker-compose.test.yml`, `scripts/test-db.sh` | Disposable test database (tmpfs data) |
@@ -177,8 +185,9 @@ cannot pass silently.
 ## Trade-offs and limitations
 
 - Database tests need Docker locally; CI provides a service container.
-- Fault points are fixed, not randomized; each scenario injects one failure.
-  Randomized multi-failure runs belong to the milestone 5 benchmark.
+- Fault scenarios inject one failure each at a fixed point; randomized
+  multi-failure runs are the benchmark's job, which checks outcomes and
+  invariants but not individual interleavings.
 - Timing-based scenarios use a 1.5 s lease; a heavily loaded machine could slow
   them but not change their assertions.
 - The ThreadSanitizer preset builds unit tests only; gRPC's own libraries are

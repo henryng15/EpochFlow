@@ -18,9 +18,9 @@ tracks what exists; planned parts are marked as such.
 
 ## Design
 
-Current status: **milestone 4 (idempotency, UNKNOWN, fault injection)**. A
-coordinator process serves the gRPC API over PostgreSQL (`--dsn`) or, without
-it, an in-memory store; worker processes pull jobs and run demonstration tasks
+Current status: **version 1 complete** (milestone 5: Docker Compose deployment
+and chaos benchmark). A coordinator process serves the gRPC API over
+PostgreSQL (`--dsn`) or, without it, an in-memory store; worker processes pull jobs and run demonstration tasks
 whose side effects are deduplicated (owned ledger) or guarded against blind
 repetition (external provider). The in-process `LocalRunner` remains for tests
 and runs the same `Worker` code.
@@ -131,6 +131,8 @@ See [invariants.md](invariants.md).
 | `src/runner/local_runner.*` | In-process workers and reclaimer |
 | `scripts/check-invariants.sql` | SQL invariant checker |
 | `apps/` | `epochflow-coordinator`, `epochflow-worker`, `epochflowctl` |
+| `Dockerfile`, `docker-compose.yml` | Image and demo deployment |
+| `scripts/bench.py`, `scripts/demo-docker.sh` | Chaos benchmark and Docker demo |
 | `proto/epochflow/v1/` | Protocol schema |
 | `tests/contract/` | Behavioral suite every `JobStore` must pass |
 

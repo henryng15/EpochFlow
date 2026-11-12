@@ -7,8 +7,8 @@ tell whether recovery is working.
 
 ## Prerequisites
 
-A build (`cmake --preset dev && cmake --build --preset dev`). Binaries are in
-`build/bin/`.
+A build (`cmake --preset dev && cmake --build --preset dev`; binaries in
+`build/bin/`), or only Docker for the Compose deployment.
 
 ## Steps
 
@@ -36,6 +36,56 @@ job, `kill -9` it, and start another worker: within one lease plus one reclaim
 interval the coordinator logs `reclaimed 1 expired lease(s)` and the job runs
 again with `generation=2`.
 
+### Docker Compose
+
+`docker-compose.yml` runs PostgreSQL 16 (named volume `pgdata`), one
+coordinator (3 s lease, published on `127.0.0.1:15051`), and three workers
+(`--work-ms=150 --work-after-effect-ms=100`). The image (`Dockerfile`) is built
+once from the same apt packages as local development; it also contains `psql`
+and the invariant checker at `/usr/local/share/epochflow/check-invariants.sql`.
+
+```bash
+docker compose up -d --build --wait
+docker compose run --rm ctl submit --payload="task=payment;account=a;amount_cents=100" --count=5
+docker compose run --rm ctl get 1
+docker compose logs -f coordinator
+docker compose up -d --scale worker=5        # more workers
+docker compose down -v                       # remove everything, including data
+```
+
+`scripts/demo-docker.sh [--jobs N] [--down]` does the above and then kills one
+worker container, freezes another with `docker pause` for longer than the
+lease, waits for every job, runs the invariant checker, and prints a summary
+(exit status 1 on any violation). The credentials are demo values.
+
+### Benchmark
+
+`scripts/bench.py` runs payments while killing (SIGKILL, then restart) or
+freezing (SIGSTOP for 1.5 leases, then SIGCONT) a random worker on a schedule
+pre-drawn from `--seed`, and reports throughput, recovery latency (chaos event
+to the next attempt of each interrupted job) p50/p95/max, retries, stale
+requests rejected, effects deduplicated, ledger entries, duplicate entries,
+overcharge, and invariant violations.
+
+```bash
+scripts/bench.py --bin build/bin --dsn "$(scripts/test-db.sh dsn)" --mode compare
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--mode` | `compare` | `epochflow`, `naive` (per-attempt operation ids), or both |
+| `--jobs`, `--workers` | 200, 3 | Workload size |
+| `--lease-ms`, `--reclaim-ms` | 1000, 100 | Coordinator timing |
+| `--work-ms`, `--work-after-effect-ms` | 30, 30 | Simulated work before and after each effect |
+| `--chaos-interval-ms`, `--kill-ratio` | 500, 0.6 | Mean time between events; share of kills |
+| `--seed` | 1 | Chaos schedule |
+| `--json PATH` | none | Also write settings and results as JSON |
+| `--check` | off | Exit 1 unless the EpochFlow run completed every job with no duplicate, overcharge, or violation |
+
+Each run uses its own schema and removes it afterwards. Recovery latency uses
+the host clock for chaos events and the database clock for attempt starts;
+both must be the same machine's clock (true for local Docker).
+
 ### Configuration
 
 | Binary | Flag | Default | Meaning |
@@ -48,6 +98,7 @@ again with `generation=2`.
 | worker | `--coordinator` | `127.0.0.1:50051` | Coordinator address |
 | worker | `--worker-id` | `HOST-PID` | Identity in job records and logs |
 | worker | `--work-ms` | 0 | Simulated processing time per job, before its side effect |
+| worker | `--work-after-effect-ms` | 0 | Simulated processing after a side effect, before reporting |
 | worker | `--provider-log` | none | File acting as the external provider; required for `task=external` jobs |
 | worker | `--fault` | none | Test only: inject one failure (see `epochflow-worker --help`) |
 | worker | `--rpc-timeout-ms` | 5000 | Deadline per RPC |
@@ -69,6 +120,7 @@ for slow networks.
 | Payload | Effect |
 | --- | --- |
 | `task=payment;account=A;amount_cents=N[;op=ID]` | One ledger entry per `op` (default `job-<id>`) |
+| `...;idempotency=off` | Benchmark baseline only: a fresh operation id per attempt, so retries duplicate the effect |
 | `task=external;account=A;amount_cents=N[;op=ID]` | At most one provider charge per `op` |
 | anything else | Echo: result `processed:<payload>` |
 

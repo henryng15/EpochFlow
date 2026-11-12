@@ -32,7 +32,7 @@ These guarantees do not provide magical exactly-once execution. Duplicate
 *attempts* remain possible after failures; EpochFlow prevents or deduplicates the
 effects it owns and makes unsupported external guarantees visible.
 
-## Initial scope
+## Scope
 
 Version 1 intentionally stays small:
 
@@ -49,57 +49,94 @@ Out of scope for v1: multi-region consensus, autoscaling, Kubernetes scheduling,
 custom database/storage engines, and unsupported exactly-once guarantees for
 third-party APIs.
 
-## Planned architecture
+## Architecture
 
 ```text
-Client
-  │ submit job
-  ▼
-Coordinator ── durable state transitions ── PostgreSQL
-  │ assign / renew / complete                 │
-  └──────────── gRPC ─────────────── Workers ─┘
-                                           │
+epochflowctl ── submit / get / reconcile ──┐
                                            ▼
-                                     task / side effect
+                                  epochflow-coordinator ── one atomic, fenced
+                                    (gRPC + reclaimer)      statement per change ──▶ PostgreSQL
+                                           ▲                                        jobs, attempts,
+      acquire / renew / effects / report   │                                        operations, ledger
+                                  epochflow-worker × N ──▶ external provider
 ```
 
-The coordinator assigns work and owns recovery decisions. Workers execute jobs,
-renew their leases independently of long-running task steps, and report results
-with the assignment generation. PostgreSQL atomically accepts a transition only
-when its expected state and generation still match.
+The coordinator assigns work and recovers expired leases. Workers renew their
+leases on a separate thread, apply side effects through the coordinator, and
+report results with their assignment generation. PostgreSQL accepts a change
+only when the job is still `RUNNING` with that generation, and deduplicates
+effects by operation id. Details: [architecture](docs/architecture.md).
 
-## Roadmap
+## Status
 
-1. Build an in-process job runner with a clear state model and tests. **(done)**
-2. Split it into a coordinator and gRPC workers. **(done)**
-3. Add PostgreSQL-backed durable state, leases, and recovery. **(done)**
-4. Add fencing, idempotent operations, and fault injection. **(done)**
-5. Package a repeatable multi-worker demo with correctness and recovery metrics.
+Version 1 is complete: all five roadmap steps are done.
+
+1. In-process job runner with a clear state model and tests.
+2. Coordinator and gRPC workers.
+3. PostgreSQL-backed durable state, leases, and recovery.
+4. Fencing, idempotent operations, `UNKNOWN` outcomes, and fault injection.
+5. Docker Compose demo and a chaos benchmark with correctness and recovery
+   metrics.
+
+## Results
+
+`scripts/bench.py --mode compare --seed 7`: 200 payments, 3 workers, 1 s lease,
+workers killed (SIGKILL) or frozen past their lease (SIGSTOP) every ~0.5 s.
+Both runs replay the same chaos schedule; **naive** differs only in sending a
+fresh operation id per attempt, like a client without idempotency keys.
+
+| Metric | EpochFlow | Naive |
+| --- | --- | --- |
+| Jobs completed | 200 / 200 | 200 / 200 |
+| Chaos events (kill / pause) | 11 (7 / 4) | 11 (7 / 4) |
+| Retries | 10 | 10 |
+| Throughput (jobs/s) | 29.0 | 29.2 |
+| Recovery latency p50 / p95 (s) | 1.01 / 1.08 | 1.05 / 1.09 |
+| Stale requests rejected by fencing | 1 | 1 |
+| Effects deduplicated | 7 | 0 |
+| **Duplicate ledger entries** | **0** | **5** |
+| **Overcharged** | **$0.00** | **$5.00** |
+| Invariant violations | 0 | 0 |
+
+Recovery takes about one lease, as designed. The protections cost no measurable
+throughput here; every crash between an effect and its report became a
+duplicate charge without idempotency, and a deduplicated no-op with it. Without
+fencing, the rejected stale request would also have overwritten a newer
+result. Numbers vary from run to run; measured on WSL2 (16 vCPU) with
+PostgreSQL 16 in Docker.
 
 ## Quick start
 
 Requires Ubuntu 24.04 (or WSL2), Docker, and the apt packages listed in
 [ADR 0001](docs/decisions/0001-cpp-toolchain-and-dependencies.md).
 
-```bash
-cmake --preset dev && cmake --build --preset dev
-ctest --preset unit
+**Docker only** (no local build needed):
 
-scripts/test-db.sh up
-EPOCHFLOW_DSN="$(scripts/test-db.sh dsn)" ctest --preset dev
+```bash
+scripts/demo-docker.sh --down     # build, run, kill and freeze workers, check invariants
 ```
 
-Run a coordinator on PostgreSQL, two workers, and ten jobs:
+**Local build and tests:**
 
 ```bash
+cmake --preset dev && cmake --build --preset dev
 scripts/test-db.sh up
+EPOCHFLOW_DSN="$(scripts/test-db.sh dsn)" ctest --preset dev     # all 200+ tests
+scripts/bench.py --bin build/bin --dsn "$(scripts/test-db.sh dsn)" --mode compare
+```
+
+**Run it by hand:**
+
+```bash
 build/bin/epochflow-coordinator --dsn="$(scripts/test-db.sh dsn)" &
 build/bin/epochflow-worker --worker-id=w1 --work-ms=200 &
 build/bin/epochflow-worker --worker-id=w2 --work-ms=200 &
-build/bin/epochflowctl wait $(build/bin/epochflowctl submit --payload=hello --count=10)
+build/bin/epochflowctl wait $(build/bin/epochflowctl submit \
+  --payload="task=payment;account=alice;amount_cents=500" --count=10)
 ```
 
-See [operations](docs/operations.md) for flags and a crash-recovery walkthrough.
+See [operations](docs/operations.md) for flags, payloads, the `UNKNOWN`
+runbook, and the benchmark.
 
 ## Documentation
 
