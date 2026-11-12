@@ -11,8 +11,12 @@ each layer must cover.
 - **Database tests** (CTest label `db`): need PostgreSQL through the
   `EPOCHFLOW_DSN` environment variable. They call `GTEST_SKIP()` when it is
   unset, so a plain local run never needs Docker.
-- **Fault-injection tests** (planned, milestone 4): start real coordinator and
-  worker processes, then crash, pause, or duplicate requests at chosen points.
+- **gRPC tests** (CTest label `grpc`): coordinator, client, and workers over a
+  loopback connection in one process. No external services.
+- **End-to-end tests** (CTest label `e2e`): real `epochflow-coordinator`,
+  `epochflow-worker`, and `epochflowctl` processes driven by a shell script.
+- **Fault-injection tests** (planned, milestone 4): crash, pause, or duplicate
+  requests at chosen points with an invariant checker.
 
 ## Design
 
@@ -38,6 +42,20 @@ The suite covers: acquire ordering and exclusivity (including 8 threads racing
 for 200 jobs), stale generation on renew/complete/fail, reassignment after
 expiry, the window between deadline and reclaim, duplicate and conflicting
 completions, retry limits, and reclaim selectivity.
+
+### gRPC and processes
+
+`tests/grpc/coordinator_grpc_test.cpp` keeps a `ManualClock` behind the
+coordinator, so lease expiry over the wire is still test-driven; it checks every
+`CommitStatus` to status-code mapping and transport-error behavior.
+`tests/grpc/distributed_test.cpp` uses the system clock with a 300 ms lease to
+run workers against the coordinator and recover a "crashed" assignment (one
+that acquires and never renews).
+
+`tests/e2e/smoke_test.sh` starts the coordinator on a free port, runs a batch
+through two workers, stops them with SIGTERM (must exit 0), then kills a slow
+worker with SIGKILL mid-job and expects another worker to finish the job with
+`attempts=2` and `generation=2`.
 
 ### Threaded components
 
@@ -81,6 +99,8 @@ cannot pass silently.
 | `tests/unit/` | Unit tests, binary `epochflow_unit_tests` |
 | `tests/contract/` | `JobStore` contract suite and `StoreHarness` |
 | `tests/support/` | `ManualClock`, `WaitUntil` |
+| `tests/grpc/` | gRPC tests, binary `epochflow_grpc_tests` |
+| `tests/e2e/` | Process-level smoke test (`e2e.smoke`) |
 | `tests/integration/` | Database tests, binary `epochflow_integration_tests` |
 | `docker-compose.test.yml`, `scripts/test-db.sh` | Disposable test database (tmpfs data) |
 
@@ -95,7 +115,11 @@ cannot pass silently.
 
 - Database tests share one database. Tests that write data must isolate
   themselves (unique IDs or per-test schema) once storage lands in milestone 3.
-- Process-level fault injection does not exist yet.
+- The e2e test covers one crash point (during work). Crashes at other points,
+  pauses, and lost acknowledgements between processes arrive with fault
+  injection in milestone 4.
+- The ThreadSanitizer preset builds unit tests only; gRPC's own libraries are
+  not instrumented, which would produce false reports.
 
 ## Related documents
 
@@ -103,3 +127,4 @@ cannot pass silently.
 - [Invariants](invariants.md)
 - [ADR 0001: toolchain and dependencies](decisions/0001-cpp-toolchain-and-dependencies.md)
 - [ADR 0002: job state model and fencing rules](decisions/0002-job-state-model-and-fencing-rules.md)
+- [Protocol](protocol.md)

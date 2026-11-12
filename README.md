@@ -71,7 +71,7 @@ when its expected state and generation still match.
 ## Roadmap
 
 1. Build an in-process job runner with a clear state model and tests. **(done)**
-2. Split it into a coordinator and gRPC workers.
+2. Split it into a coordinator and gRPC workers. **(done)**
 3. Add PostgreSQL-backed durable state, leases, and recovery.
 4. Add fencing, idempotent operations, and fault injection.
 5. Package a repeatable multi-worker demo with correctness and recovery metrics.
@@ -89,10 +89,23 @@ scripts/test-db.sh up
 EPOCHFLOW_DSN="$(scripts/test-db.sh dsn)" ctest --preset dev
 ```
 
+Run a coordinator, two workers, and ten jobs:
+
+```bash
+build/bin/epochflow-coordinator &
+build/bin/epochflow-worker --worker-id=w1 --work-ms=200 &
+build/bin/epochflow-worker --worker-id=w2 --work-ms=200 &
+build/bin/epochflowctl wait $(build/bin/epochflowctl submit --payload=hello --count=10)
+```
+
+See [operations](docs/operations.md) for flags and a crash-recovery walkthrough.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md): components and data/control flows
 - [Invariants](docs/invariants.md): safety properties and their enforcement
+- [Protocol](docs/protocol.md): gRPC API semantics, errors, retry safety
+- [Operations](docs/operations.md): running the binaries, configuration, logs
 - [Testing](docs/testing.md): test layers and how to run them
 - [Decisions](docs/decisions/): ADRs
 
